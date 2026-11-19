@@ -1,0 +1,5 @@
+{
+  "platforms": ["apple", "android"],
+  "apple": { "modules": ["TensorFoldPerceptionModule"] },
+  "android": { "modules": ["expo.modules.tensorfoldperception.TensorFoldPerceptionModule"] }
+}

@@ -1,0 +1,5 @@
+{
+  "platforms": ["ios", "android"],
+  "ios": { "modules": ["TensorFoldEngineModule"] },
+  "android": { "modules": ["expo.modules.tensorfoldengine.TensorFoldEngineModule"] }
+}

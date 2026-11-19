@@ -1,0 +1,8 @@
+{
+  "name": "tensorfold-perception",
+  "version": "1.0.0",
+  "private": true,
+  "description": "On-device ARKit and ARCore perception for accessible navigation",
+  "main": "src/index.ts",
+  "types": "src/index.ts"
+}

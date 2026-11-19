@@ -1,0 +1,16 @@
+node_modules/
+.expo/
+dist/
+build/
+.cxx/
+/ios/
+/android/
+vendor/TensorFold/
+*.log
+.DS_Store
+.env
+.env.*
+!.env.example
+coverage/
+modules/tensorfold-vision/ios/vendor/
+modules/tensorfold-engine/ios/vendor/

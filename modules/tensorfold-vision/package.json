@@ -1,0 +1,8 @@
+{
+  "name": "tensorfold-vision",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Explicit on-device SmolVLM2 scene queries through LiteRT-LM",
+  "main": "src/index.ts",
+  "types": "src/index.ts"
+}

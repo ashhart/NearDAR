@@ -1,0 +1,8 @@
+{
+  "name": "tensorfold-haptics",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Discrete directional haptic cues for TensorFold Guide",
+  "main": "src/index.ts",
+  "types": "src/index.ts"
+}

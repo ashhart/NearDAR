@@ -1,0 +1,5 @@
+{
+  "platforms": ["apple", "android"],
+  "apple": { "modules": ["TensorFoldHapticsModule"] },
+  "android": { "modules": ["expo.modules.tensorfoldhaptics.TensorFoldHapticsModule"] }
+}

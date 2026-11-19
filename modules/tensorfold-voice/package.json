@@ -1,0 +1,1 @@
+{"name":"tensorfold-voice","version":"1.0.0","private":true,"description":"Offline speech recognition, speech synthesis, and headset audio routing","main":"src/index.ts","types":"src/index.ts"}

@@ -1,0 +1,8 @@
+{
+  "name": "tensorfold-engine",
+  "version": "1.0.0",
+  "private": true,
+  "description": "On-device TensorFold generation and verified model installation",
+  "main": "src/index.ts",
+  "types": "src/index.ts"
+}
