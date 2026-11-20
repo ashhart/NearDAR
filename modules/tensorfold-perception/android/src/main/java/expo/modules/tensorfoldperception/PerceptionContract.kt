@@ -69,14 +69,18 @@ object PerceptionContract {
     if (native["source"] == "arcore") {
       notes.add("Named chair and person detection is unavailable in this ARCore adapter. Generic depth obstacles and captured image evidence remain available.")
     }
-    val recognizedText = mapList(native["ocr"]).mapNotNull { (it["text"] as? String)?.takeIf(String::isNotEmpty) }
+    val textObservations = mapList(native["ocr"]).mapNotNull { observation ->
+      val text = (observation["text"] as? String)?.takeIf(String::isNotEmpty) ?: return@mapNotNull null
+      mapOf("text" to text, "direction" to direction(asMap(observation["direction"])))
+    }
     val validDepthFraction = obstacles.sumOf { number(it["validPixelFraction"]) ?: 0.0 } / 15
     val trackingReady = native["trackingState"] == "normal" && nativeDepth != "stale"
     val result = mutableMapOf<String, Any?>(
       "observedAt" to (number(native["cameraTimestampMs"]) ?: number(native["capturedAtMs"]) ?: System.currentTimeMillis().toDouble()),
       "sequence" to sequence.incrementAndGet(), "trackingReady" to trackingReady, "depthState" to depthState,
       "validDepthFraction" to validDepthFraction, "cameraOrientation" to "camera-forward",
-      "objects" to objects, "freeSeats" to freeSeats, "recognizedText" to recognizedText, "notes" to notes
+      "objects" to objects, "freeSeats" to freeSeats, "recognizedText" to textObservations.mapNotNull { it["text"] },
+      "textObservations" to textObservations, "notes" to notes
     )
     val image = asMap(native["image"])
     (image?.get("uri") as? String)?.let { result["temporaryImagePath"] = it }
@@ -148,7 +152,7 @@ object PerceptionContract {
     return when (native["bearing"] as? String) {
       "left", "upper-left", "lower-left" -> "left"
       "right", "upper-right", "lower-right" -> "right"
-      "ahead", "above", "below" -> "ahead"
+      "ahead", "above", "below", "upper", "lower" -> "ahead"
       else -> "unknown"
     }
   }

@@ -1,4 +1,5 @@
 import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from 'react'
+import { AccessibilityInfo, Platform } from 'react-native'
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake'
 import * as Engine from '../../../modules/tensorfold-engine/src'
 import * as Perception from '../../../modules/tensorfold-perception/src'
@@ -8,12 +9,17 @@ import * as Haptics from '../../../modules/tensorfold-haptics/src'
 import { useAppSettings } from '../SettingsContext'
 import { WarningGate } from './alerts'
 import { parseIntent } from './intents'
-import { answerAhead, answerQuestion, answerSeats, answerText, buildGenerationRequest, sensorLimit, validatedGeneratedAnswer } from './scene'
+import { answerAhead, answerQuestion, answerText, buildGenerationRequest, requestedObject, requestedSide, sensorLimit, validatedGeneratedAnswer } from './scene'
+import { answerErrand, errandHasLabel, findErrand, shoppingCommand, type Errand, type ShoppingCommand } from './errands'
 import { mergeVisionEvidence, visionPrompt } from './vision'
-import type { EngineCapabilities, EngineStatus, GuidanceController, SceneSnapshot, SceneWarning, SessionState, VoiceCapabilities } from './types'
-
+import { describeCurrentLocation } from './location'
+import { normalizeCompanionName } from '../settings'
+import { useVisionModel } from './useVisionModel'
+import { useConversationModel } from './useConversationModel'
+import type { GuidanceController, GuidanceReply, SceneSnapshot, SceneWarning, SessionState, VoiceCapabilities } from './types'
 
 const Context = createContext<GuidanceController | null>(null)
+const silenceCodes = new Set(['ERR_RECOGNITION_NO_MATCH', 'ERR_RECOGNITION_SPEECH_TIMEOUT', 'E_RECOGNITION_1110'])
 
 async function waitForPostPermissionForeground(): Promise<boolean> {
   if (await Perception.isForeground().catch(() => false)) return true
@@ -25,126 +31,174 @@ async function waitForPostPermissionForeground(): Promise<boolean> {
   })
 }
 
-function isInstallCancellation(error: unknown): boolean {
-  if (!error || typeof error !== 'object') return false
-  const candidate = error as { code?: string; name?: string }
-  return candidate.code === 'E_INSTALL_CANCELLED' || candidate.name === 'AbortError'
-}
-
 export function GuidanceProvider({ children }: { children: ReactNode }) {
-  const { settings } = useAppSettings()
+  const { settings, update } = useAppSettings()
   const [state, setState] = useState<SessionState>('idle')
+  const [startPending, setStartPending] = useState(false)
+  const [cameraPermissionBlocked, setCameraPermissionBlocked] = useState(false)
   const [statusMessage, setStatusMessage] = useState('Start guidance when your camera is unobstructed.')
   const [listening, setListening] = useState(false)
+  const [handsFree, setHandsFree] = useState(false)
   const [speaking, setSpeaking] = useState(false)
-  const [lastAnswer, setLastAnswer] = useState('')
-  const [lastTranscript, setLastTranscript] = useState('')
+  const [lastReply, setLastReply] = useState<GuidanceReply>()
+  const [questionPhase, setQuestionPhase] = useState<GuidanceController['questionPhase']>(null)
+  const [voiceNotice, setVoiceNotice] = useState<string>()
+  const [voiceModelMissing, setVoiceModelMissing] = useState(false)
+  const [speechDownloadPending, setSpeechDownloadPending] = useState(false)
+  const [warning, setWarning] = useState<SceneWarning>()
   const [snapshot, setSnapshot] = useState<SceneSnapshot>()
-  const [engine, setEngine] = useState<EngineCapabilities>()
-  const [engineStatus, setEngineStatus] = useState<EngineStatus>({ state: 'not-installed' })
+  const { capabilities: engine, status: engineStatus, ...engineControls } = useConversationModel(setStatusMessage)
   const [voice, setVoice] = useState<VoiceCapabilities>()
-  const [vision, setVision] = useState<EngineCapabilities>()
-  const [visionStatus, setVisionStatus] = useState<EngineStatus>({ state: 'not-installed' })
-  const snapshotRef = useRef<SceneSnapshot | undefined>(undefined)
+  const visual = useVisionModel()
   const settingsRef = useRef(settings)
   const stateRef = useRef<SessionState>('idle')
-  const answerRef = useRef('')
+  const errandRef = useRef<Errand | undefined>(undefined)
+  const [shoppingList, setShoppingList] = useState<string[]>([])
+  const replyRef = useRef<GuidanceReply | undefined>(undefined)
   const transcriptAction = useRef<(text: string) => void>(() => {})
   const gate = useRef(new WarningGate())
   const requestCounter = useRef(0)
   const activeRequest = useRef<string | undefined>(undefined)
   const activeVisionRequest = useRef<string | undefined>(undefined)
   const previousRoute = useRef<VoiceCapabilities['route']>('unknown')
+  const voiceRecognition = useRef<boolean | undefined>(undefined)
   const depthExpected = useRef(false)
   const sensorDegraded = useRef(false)
   const mounted = useRef(true)
   const listeningRef = useRef(false)
+  const handsFreeRef = useRef(false)
   const speakingRef = useRef(false)
+  const speechId = useRef<string | undefined>(undefined)
+  const speechCounter = useRef(0)
   const processingRequest = useRef<string | undefined>(undefined)
   const pausing = useRef(false)
+  const starting = useRef(false)
+  const cameraEpoch = useRef(0)
   const voiceTransition = useRef(false)
   const voiceRetryBlocked = useRef(false)
   const voicePermissionPending = useRef(false)
-
+  const locationPermissionPending = useRef(false)
+  const locationRequest = useRef<AbortController | null>(null)
+  const textEntry = useRef(false)
+  const resumeListeningRef = useRef(resumeListening)
   settingsRef.current = settings
-  snapshotRef.current = snapshot
   stateRef.current = state
-  answerRef.current = lastAnswer
   listeningRef.current = listening
   speakingRef.current = speaking
   transcriptAction.current = (text) => { void processQuestion(text) }
+  resumeListeningRef.current = resumeListening
 
   async function resumeListening() {
-    if (!mounted.current || !settingsRef.current.continuousListening || pausing.current || voiceTransition.current || voiceRetryBlocked.current || processingRequest.current || speakingRef.current || listeningRef.current) return
+    if (handsFreeRef.current) await beginListening()
+  }
+
+  async function beginListening() {
+    if (!mounted.current || voiceRecognition.current === false || textEntry.current || pausing.current || voiceTransition.current || voiceRetryBlocked.current || voicePermissionPending.current || processingRequest.current || speakingRef.current || listeningRef.current) return
     if (stateRef.current !== 'active' && stateRef.current !== 'degraded') return
+    const epoch = cameraEpoch.current
     voicePermissionPending.current = true
     try {
-      await Voice.startListening()
-      voiceRetryBlocked.current = false
-      listeningRef.current = true
-      if (mounted.current) setListening(true)
+      await Voice.startListening({ silenceTimeoutMs: 2_400 })
+      if (textEntry.current || voiceRetryBlocked.current || epoch !== cameraEpoch.current) {
+        await Voice.stopListening()
+      } else {
+        voiceRetryBlocked.current = false
+        setVoiceNotice(undefined)
+        setVoiceModelMissing(false)
+        listeningRef.current = true
+        if (mounted.current) setListening(true)
+      }
     } catch (error) {
-      voiceRetryBlocked.current = true
-      listeningRef.current = false
-      if (mounted.current) {
+      if (mounted.current && epoch === cameraEpoch.current && !textEntry.current && !voiceRetryBlocked.current) {
+        voiceRetryBlocked.current = true
+        listeningRef.current = false
         setListening(false)
-        setStatusMessage(error instanceof Error ? error.message : 'Continuous on-device listening is unavailable. Use the Ask a question control.')
+        setSessionMode(false)
+        setVoiceNotice(error instanceof Error ? error.message : 'On-device voice input couldn’t start.')
       }
     }
     const foreground = await waitForPostPermissionForeground()
     voicePermissionPending.current = false
-    if (!foreground && (stateRef.current === 'active' || stateRef.current === 'degraded')) await pause(true)
+    if (!foreground && epoch === cameraEpoch.current) await pause(true)
+  }
+
+  function setSessionMode(enabled: boolean) {
+    handsFreeRef.current = enabled
+    setHandsFree(enabled)
   }
 
   function updateState(next: SessionState, message: string) {
-    if (next === 'starting') pausing.current = false
     stateRef.current = next
     setState(next)
     setStatusMessage(message)
   }
 
   async function speak(text: string, urgent = false) {
+    const epoch = cameraEpoch.current
+    const utteranceId = `neardar-speech-${++speechCounter.current}`
+    speechId.current = utteranceId
     speakingRef.current = true
     setSpeaking(true)
     await Voice.stopListening().catch(() => {})
+    if (epoch !== cameraEpoch.current || speechId.current !== utteranceId) return
     listeningRef.current = false
     setListening(false)
     try {
       await Voice.speak(text, {
+        utteranceId,
         rate: settingsRef.current.speechRate,
         priority: urgent ? 'urgent' : 'answer',
         interrupt: true,
         speakerFallback: settingsRef.current.speakerFallback,
       })
     } catch (error) {
+      if (speechId.current !== utteranceId) return
+      speechId.current = undefined
       speakingRef.current = false
       setSpeaking(false)
-      setStatusMessage(error instanceof Error ? error.message : 'Speech is unavailable on this device.')
+      setVoiceNotice(error instanceof Error ? error.message : 'Speech is unavailable on this device.')
+      if (Platform.OS === 'ios') AccessibilityInfo.announceForAccessibilityWithOptions(text, { queue: !urgent })
       await resumeListening()
     }
   }
 
   async function pause(silent = false) {
+    if (pausing.current) return
     pausing.current = true
+    cameraEpoch.current += 1
+    errandRef.current = undefined
+    speechId.current = undefined
+    setSessionMode(false)
+    updateState('stopping', 'Turning off the camera and microphone.')
+    textEntry.current = false
     processingRequest.current = undefined
+    locationRequest.current?.abort()
+    setQuestionPhase(null)
     const requestId = activeRequest.current
-    if (requestId) await Engine.cancel(requestId).catch(() => {})
     activeRequest.current = undefined
     const visionRequestId = activeVisionRequest.current
-    if (visionRequestId) await Vision.cancel(visionRequestId).catch(() => {})
     activeVisionRequest.current = undefined
-    await Promise.allSettled([Perception.stopSession(), Voice.stopListening(), Voice.stopSpeaking(), Haptics.stop()])
-    await deactivateKeepAwake('guidance')
+    const stopping = [Perception.stopSession(), Voice.stopListening(), Voice.stopSpeaking(), Haptics.stop()]
+    if (requestId) stopping.push(Engine.cancel(requestId))
+    if (visionRequestId) stopping.push(Vision.cancel(visionRequestId))
+    await Promise.allSettled(stopping)
+    await deactivateKeepAwake('guidance').catch(() => {})
     gate.current.reset()
+    setSnapshot(undefined)
+    setWarning(undefined)
+    listeningRef.current = false
+    speakingRef.current = false
     mounted.current && setListening(false)
     mounted.current && setSpeaking(false)
-    updateState('paused', 'Guidance paused. Start again when the camera is unobstructed.')
-    if (!silent) await speak('Guidance paused.')
+    updateState('paused', 'Camera and microphone off.')
+    pausing.current = false
+    if (!silent) await speak('Camera and microphone off.')
   }
 
   async function handleWarning(warning: SceneWarning) {
     const running = stateRef.current === 'active' || stateRef.current === 'degraded'
-    if (!running || !gate.current.accept(warning)) return
+    if (!running || pausing.current || !gate.current.accept(warning)) return
+    setWarning(warning)
     setStatusMessage(warning.message)
     if (settingsRef.current.urgentHaptics && (warning.severity !== 'info' || warning.kind === 'sensor')) {
       void Haptics.play({ direction: warning.kind === 'sensor' ? 'unknown' : warning.direction || 'ahead', severity: warning.severity, distanceMeters: warning.distanceMeters }).catch(() => {})
@@ -152,35 +206,92 @@ export function GuidanceProvider({ children }: { children: ReactNode }) {
     await speak(warning.message, warning.severity === 'urgent')
   }
 
-  async function start() {
-    if (stateRef.current === 'starting' || stateRef.current === 'active') return
-    updateState('starting', 'Starting camera, depth, and voice services.')
+  async function start(handsFree = settingsRef.current.continuousListening) {
+    if (starting.current || pausing.current || stateRef.current === 'active' || stateRef.current === 'degraded') return
+    starting.current = true
+    setStartPending(true)
+    const epoch = ++cameraEpoch.current
+    setCameraPermissionBlocked(false)
+    setSessionMode(handsFree && voiceRecognition.current !== false)
+    updateState('starting', 'Starting the camera.')
     gate.current.reset()
     sensorDegraded.current = false
     voiceRetryBlocked.current = false
-    snapshotRef.current = undefined
+    setVoiceNotice(undefined)
+    setWarning(undefined)
     setSnapshot(undefined)
     try {
       const capabilities = await Perception.getCapabilities()
+      if (epoch !== cameraEpoch.current) return
       depthExpected.current = capabilities.depth
-      if (!capabilities.available) throw new Error(capabilities.reason || 'Camera perception is unavailable on this device.')
+      if (!capabilities.available) {
+        setCameraPermissionBlocked(capabilities.cameraPermission === 'denied' || capabilities.cameraPermission === 'restricted')
+        throw new Error(capabilities.reason || 'Camera perception is unavailable on this device.')
+      }
       await Perception.startSession(settingsRef.current)
-      // Permission promises can resolve before Android's resume event reaches React Native.
-      if (!(await waitForPostPermissionForeground())) {
-        await pause(true)
+      if (epoch !== cameraEpoch.current) {
+        await Perception.stopSession()
         return
       }
-      await activateKeepAwakeAsync('guidance')
-      updateState(capabilities.depth ? 'active' : 'degraded', capabilities.depth ? 'Guidance active. Point the camera where you want to inspect.' : 'Camera guidance is active without depth. Distances and step estimates are unavailable.')
-      await speak(capabilities.depth ? 'Guidance started.' : 'Guidance started without depth measurements.')
+      // Permission promises can resolve before Android's resume event reaches React Native.
+      if (!(await waitForPostPermissionForeground())) {
+        if (epoch === cameraEpoch.current) await pause(true)
+        return
+      }
+      if (epoch !== cameraEpoch.current) return
+      await activateKeepAwakeAsync('guidance').catch(() => {})
+      const startedCapabilities = await Perception.getCapabilities().catch(() => capabilities)
+      if (epoch !== cameraEpoch.current) {
+        await deactivateKeepAwake('guidance').catch(() => {})
+        return
+      }
+      depthExpected.current = startedCapabilities.depth
+      updateState(depthExpected.current ? 'active' : 'degraded', depthExpected.current ? 'Point the camera at what you want to inspect.' : 'Camera is on. Depth measurements are unavailable.')
+      void visual.prepare(false)
+      const opening = handsFreeRef.current ? 'Hands-free is on. Try asking what’s on my left. Say stop camera to finish.' : 'Camera on.'
+      await speak(depthExpected.current ? opening : `${opening} Distance and obstacle alerts are unavailable.`)
     } catch (error) {
+      await Promise.allSettled([Perception.stopSession(), deactivateKeepAwake('guidance')])
+      if (epoch !== cameraEpoch.current) return
+      setSessionMode(false)
+      if (error && typeof error === 'object' && 'code' in error && error.code === 'E_CAMERA_PERMISSION') setCameraPermissionBlocked(true)
       const message = error instanceof Error ? error.message : 'Guidance could not start.'
       updateState('error', message)
       await speak(`Guidance could not start. ${message}`)
+    } finally {
+      starting.current = false
+      setStartPending(false)
     }
   }
 
-  async function processQuestion(question: string) {
+  async function handleShopping(command: ShoppingCommand) {
+    if (command.kind === 'next') {
+      if (shoppingList[0]) await processQuestion(`Find ${shoppingList[0]}`)
+      else await deliverReply({ text: 'Your shopping list is empty.' })
+      return
+    }
+    if (command.kind === 'check-off') {
+      const errand = errandRef.current
+      if (errand?.kind !== 'item' || !shoppingList.includes(errand.name)) {
+        await deliverReply({ text: 'Choose an item from your shopping list first.' })
+        return
+      }
+      const remaining = shoppingList.filter((item) => item !== errand.name)
+      setShoppingList(remaining)
+      await deliverReply({ text: `Crossed off ${errand.name}. ${remaining[0] ? `Next is ${remaining[0]}.` : 'Your list is complete.'}` })
+      return
+    }
+    const items = command.kind === 'list' ? command.items : command.kind === 'clear' ? [] : shoppingList
+    if (command.kind !== 'read') setShoppingList(items)
+    await deliverReply({ text: items.length ? `On your list: ${items.join(', ')}. Say “next item” when you’re ready.` : 'Your shopping list is empty.' })
+  }
+
+  async function processQuestion(question: string, retry?: Errand) {
+    const shopping = retry ? undefined : shoppingCommand(question)
+    if (shopping) {
+      if (!processingRequest.current && !pausing.current) await handleShopping(shopping)
+      return
+    }
     const intent = parseIntent(question)
     if (intent.kind === 'stop-session') {
       await pause()
@@ -190,38 +301,76 @@ export function GuidanceProvider({ children }: { children: ReactNode }) {
       await stopSpeech()
       return
     }
+    if (intent.kind === 'stop-listening') {
+      stopListeningInput()
+      await speak('Microphone off.')
+      return
+    }
+    if (intent.kind === 'voice-help') {
+      await speak('Try find a seat, find the checkout, or help me find baked beans. Say check the label to verify a product, check again for a fresh view, or stop camera to finish.')
+      return
+    }
     if (intent.kind === 'repeat') {
       await repeat()
       return
     }
+    if (intent.kind === 'check-again') {
+      await checkAgain()
+      return
+    }
+    if (intent.kind === 'location') {
+      await sayLocation(question)
+      return
+    }
+    if (intent.kind === 'remember-name' || intent.kind === 'forget-name') {
+      const name = intent.kind === 'remember-name' ? normalizeCompanionName(intent.name) : ''
+      await update({ companionName: name })
+      await deliverReply({ text: name ? `I’ll call you ${name}.` : 'I’ve cleared your saved name.' })
+      return
+    }
     if (stateRef.current !== 'active' && stateRef.current !== 'degraded') await start()
-    if (stateRef.current === 'error') return
-    if (processingRequest.current) return
-    setLastTranscript(question)
+    if (pausing.current || processingRequest.current || (stateRef.current !== 'active' && stateRef.current !== 'degraded')) return
+    const errand = retry ?? findErrand(question, intent, errandRef.current)
+    if (errand) errandRef.current = errand
+    const canUseVisual = intent.kind !== 'read' && errand?.kind !== 'checkout' && !(errand?.kind === 'item' && errand.verify)
     requestCounter.current += 1
     const requestId = `scene-${Date.now()}-${requestCounter.current}`
     processingRequest.current = requestId
+    setQuestionPhase('capturing')
+    const reply = { question, source: 'view' as const, errand }
+    let detail: string | undefined
     try {
-      await Voice.stopListening()
+      await Voice.stopListening().catch(() => {})
       setListening(false)
       listeningRef.current = false
-      void speak('Inspecting the current view.')
-      const captured = await Perception.captureScene()
+      if (processingRequest.current !== requestId) return
+      if (canUseVisual && errand?.kind !== 'item' && visual.statusRef.current.state === 'loading') {
+        setQuestionPhase('loading-model')
+        await visual.prepare(false)
+        if (processingRequest.current !== requestId) return
+      }
+      setQuestionPhase('capturing')
+      const useVisual = canUseVisual && visual.statusRef.current.state === 'ready'
+      if (errand?.kind === 'seat' && !useVisual && visual.capabilities?.available) {
+        detail = 'Get offline descriptions to check whether a visible seat looks empty.'
+      }
+      const captured = await Perception.captureScene({ includeImage: useVisual, recognizeText: intent.kind === 'read' || intent.kind === 'question' || errand?.kind === 'checkout' })
       let nextSnapshot: SceneSnapshot = captured
       const captureWasFresh = captured.trackingReady && Date.now() - captured.observedAt <= 3_000
-      if (visionStatus.state === 'ready' && processingRequest.current === requestId && stateRef.current !== 'paused' && (captured.imageBase64 || captured.temporaryImagePath)) {
+      if (useVisual && !errandHasLabel(errand, captured) && processingRequest.current === requestId && captureWasFresh && (captured.imageBase64 || captured.temporaryImagePath)) {
+        setQuestionPhase('looking')
         activeVisionRequest.current = `${requestId}-vision`
         try {
           const raw = await Vision.describeScene({
             requestId: activeVisionRequest.current,
-            prompt: visionPrompt(intent.kind === 'question' ? intent.question : question),
+            prompt: visionPrompt(errand?.kind === 'item' ? `Find ${errand.name}` : question, errand?.kind === 'seat'),
             imageBase64: captured.imageBase64,
             temporaryImagePath: captured.temporaryImagePath,
             maxTokens: 96,
           })
           nextSnapshot = mergeVisionEvidence(raw, nextSnapshot)
-        } catch (error) {
-          nextSnapshot = { ...nextSnapshot, notes: [...nextSnapshot.notes, error instanceof Error ? error.message : 'Visual inference is unavailable.'] }
+        } catch {
+          detail = 'Offline descriptions couldn’t analyse this image. This answer uses the available camera information.'
         } finally {
           if (activeVisionRequest.current === `${requestId}-vision`) activeVisionRequest.current = undefined
         }
@@ -230,18 +379,17 @@ export function GuidanceProvider({ children }: { children: ReactNode }) {
         try {
           await Perception.releaseCapture(captured.temporaryImagePath)
         } catch (error) {
-          setStatusMessage(error instanceof Error ? error.message : 'The temporary scene image could not be released.')
+          detail = error instanceof Error ? error.message : 'The temporary scene image could not be released.'
         }
       }
-      if (stateRef.current === 'paused' || processingRequest.current !== requestId) return
+      if (processingRequest.current !== requestId) return
       const storedSnapshot = { ...nextSnapshot, imageBase64: undefined, temporaryImagePath: undefined }
-      snapshotRef.current = storedSnapshot
-      setSnapshot(storedSnapshot)
       let generatedAnswer: string | undefined
-      if (engineStatus.state === 'ready' && intent.kind === 'question') {
+      if (!errand && engineStatus.state === 'ready' && intent.kind === 'question' && !requestedObject(intent.question).length && !requestedSide(intent.question)) {
+        setQuestionPhase('answering')
         activeRequest.current = requestId
         try {
-          const raw = await Engine.generate(buildGenerationRequest(intent.kind === 'question' ? intent.question : question, nextSnapshot, requestId))
+          const raw = await Engine.generate(buildGenerationRequest(intent.question, storedSnapshot, requestId))
           generatedAnswer = validatedGeneratedAnswer(raw, nextSnapshot) || undefined
         } catch (error) {
           if (processingRequest.current === requestId) setStatusMessage(error instanceof Error ? error.message : 'TensorFold inference is unavailable; using measured scene facts.')
@@ -249,24 +397,50 @@ export function GuidanceProvider({ children }: { children: ReactNode }) {
           if (activeRequest.current === requestId) activeRequest.current = undefined
         }
       }
-      if ((stateRef.current as SessionState) === 'paused' || processingRequest.current !== requestId) return
+      if (processingRequest.current !== requestId) return
       const frozenResponse = captureWasFresh && Date.now() - captured.observedAt > 3_000
-      const fallback = intent.kind === 'seat' ? answerSeats(nextSnapshot, frozenResponse) : intent.kind === 'read' ? answerText(nextSnapshot, frozenResponse) : intent.kind === 'question' ? answerQuestion(intent.question, nextSnapshot, frozenResponse) : answerAhead(nextSnapshot, frozenResponse)
+      const fallback = errand ? answerErrand(errand, nextSnapshot, frozenResponse) : intent.kind === 'read' ? answerText(nextSnapshot, frozenResponse) : intent.kind === 'question' ? answerQuestion(intent.question, nextSnapshot, frozenResponse) : answerAhead(nextSnapshot, frozenResponse)
       const responseLimit = sensorLimit(nextSnapshot, frozenResponse)
       const selected = responseLimit ?? generatedAnswer ?? fallback
-      const answer = frozenResponse && !responseLimit ? `From the captured view: ${selected}` : selected
-      setLastAnswer(answer)
-      answerRef.current = answer
+      const answer = frozenResponse && !responseLimit ? `From the captured view. ${selected}` : selected
       if (processingRequest.current === requestId) processingRequest.current = undefined
-      await speak(answer)
+      setQuestionPhase(null)
+      await deliverReply({ ...reply, text: answer, detail })
     } catch (error) {
       if (activeRequest.current === requestId) activeRequest.current = undefined
       if (activeVisionRequest.current === `${requestId}-vision`) activeVisionRequest.current = undefined
-      if (stateRef.current === 'paused' || processingRequest.current !== requestId) return
+      if (processingRequest.current !== requestId) return
       processingRequest.current = undefined
+      setQuestionPhase(null)
       const message = error instanceof Error ? error.message : 'Scene capture failed.'
-      setStatusMessage(message)
-      await speak('I could not inspect this view. Keep the camera uncovered and try again.')
+      const answer = 'I could not inspect this view. Keep the camera uncovered and try again.'
+      await deliverReply({ ...reply, text: answer, detail: message })
+    }
+  }
+  async function deliverReply(reply: GuidanceReply) {
+    replyRef.current = reply
+    setLastReply(reply)
+    await speak(reply.text)
+  }
+  async function sayLocation(question: string) {
+    if (processingRequest.current || locationRequest.current || starting.current || pausing.current) return
+    const request = new AbortController()
+    locationRequest.current = request
+    processingRequest.current = 'location'
+    setQuestionPhase('locating')
+    await Voice.stopListening().catch(() => {})
+    try {
+      const answer = await describeCurrentLocation(request.signal, (pending) => { locationPermissionPending.current = pending })
+      if (answer && !request.signal.aborted) await deliverReply({ text: answer, source: 'location', question })
+    } catch {
+      if (!request.signal.aborted) await deliverReply({ text: 'Your phone couldn’t look up your location right now.', question, source: 'location' })
+    } finally {
+      locationRequest.current = null
+      if (processingRequest.current === 'location') {
+        processingRequest.current = undefined
+        setQuestionPhase(null)
+        void resumeListening()
+      }
     }
   }
 
@@ -275,49 +449,99 @@ export function GuidanceProvider({ children }: { children: ReactNode }) {
       await processQuestion(question)
       return
     }
-    if (stateRef.current !== 'active' && stateRef.current !== 'degraded') await start()
-    if (stateRef.current === 'error' || processingRequest.current) return
+    if (stateRef.current !== 'active' && stateRef.current !== 'degraded') await start(false)
+    if (textEntry.current || pausing.current || voiceTransition.current || voicePermissionPending.current || processingRequest.current || (stateRef.current !== 'active' && stateRef.current !== 'degraded')) return
+    const epoch = cameraEpoch.current
     voiceTransition.current = true
+    speechId.current = undefined
     await Promise.allSettled([Voice.stopSpeaking(), Voice.stopListening()])
+    voiceTransition.current = false
+    if (epoch !== cameraEpoch.current) return
     speakingRef.current = false
     listeningRef.current = false
     setSpeaking(false)
     setListening(false)
-    let failure: string | undefined
+    voiceRetryBlocked.current = false
+    if (settingsRef.current.continuousListening) setSessionMode(true)
+    await beginListening()
+  }
+
+  function enableHandsFree() {
+    if (stateRef.current !== 'active' && stateRef.current !== 'degraded') return
+    if (voiceRecognition.current === false) return
+    voiceRetryBlocked.current = false
+    setVoiceNotice(undefined)
+    setSessionMode(true)
+    void resumeListening()
+  }
+
+  async function downloadOfflineSpeech() {
+    if (speechDownloadPending) return
+    setSpeechDownloadPending(true)
+    setVoiceNotice('Requesting offline speech from Android.')
     try {
-      voiceRetryBlocked.current = false
-      voicePermissionPending.current = true
-      await Voice.startListening()
-      listeningRef.current = true
-      setListening(true)
+      const status = await Voice.downloadOfflineRecognition()
+      if (status === 'ready') {
+        setVoiceModelMissing(false)
+        setVoiceNotice('Offline speech is ready.')
+      } else {
+        setVoiceNotice('Download requested. Try voice input again in a moment.')
+      }
     } catch (error) {
-      voiceRetryBlocked.current = true
-      failure = error instanceof Error ? error.message : 'On-device speech recognition is unavailable.'
-      setStatusMessage(failure)
+      setVoiceNotice(error instanceof Error ? error.message : 'Offline speech download failed. Check your connection and try again.')
     } finally {
-      voiceTransition.current = false
+      setSpeechDownloadPending(false)
     }
-    const foreground = await waitForPostPermissionForeground()
-    voicePermissionPending.current = false
-    if (!foreground && (stateRef.current === 'active' || stateRef.current === 'degraded')) {
-      await pause(true)
-      return
+  }
+
+  function setTextEntry(active: boolean) {
+    textEntry.current = active
+    if (active) {
+      listeningRef.current = false
+      setListening(false)
+      void Voice.stopListening().catch(() => {})
+    } else {
+      void resumeListening()
     }
-    if (failure) await speak(failure)
+  }
+
+  function stopListeningInput() {
+    setSessionMode(false)
+    voiceRetryBlocked.current = true
+    listeningRef.current = false
+    setListening(false)
+    void Voice.stopListening().catch(() => {})
   }
 
   async function repeat() {
-    const answer = answerRef.current
-    await speak(answer || 'There is no answer to repeat yet.')
+    const reply = replyRef.current
+    if (!reply) await speak('There is no answer to repeat yet.')
+    else if (reply.source === 'view') await speak(`From the previous view. ${reply.text.replace(/^From the captured view\. /, '')}`)
+    else await speak(reply.source === 'location' ? `From your last location check. ${reply.text}` : reply.text)
+  }
+
+  async function checkAgain() {
+    const reply = replyRef.current
+    if (!reply?.question) await speak('Ask a question first, then you can say check again.')
+    else if (reply.source === 'view' && stateRef.current !== 'active' && stateRef.current !== 'degraded') await speak('Start the camera to check the view again.')
+    else await processQuestion(reply.question, reply.errand)
+  }
+
+  async function checkLabel() {
+    const errand = replyRef.current?.errand
+    if (errand?.kind === 'item') await processQuestion('Check the label', { ...errand, verify: true })
   }
 
   async function stopSpeech() {
+    speechId.current = undefined
     voiceTransition.current = true
     const requestId = activeRequest.current
     const visionRequestId = activeVisionRequest.current
     activeRequest.current = undefined
     activeVisionRequest.current = undefined
     processingRequest.current = undefined
+    locationRequest.current?.abort()
+    setQuestionPhase(null)
     try {
       const cancellations = [Voice.stopSpeaking(), Voice.stopListening()]
       if (requestId) cancellations.push(Engine.cancel(requestId).catch(() => {}))
@@ -333,120 +557,21 @@ export function GuidanceProvider({ children }: { children: ReactNode }) {
     await resumeListening()
   }
 
-  async function installModel() {
-    setEngineStatus({ state: 'downloading', progress: 0, message: 'Preparing the model download.' })
-    try {
-      const result = await Engine.installModel()
-      setEngineStatus(result)
-    } catch (error) {
-      if (isInstallCancellation(error)) setEngineStatus({ state: 'not-installed', message: 'Download cancelled. No model was installed.' })
-      else setEngineStatus({ state: 'error', message: error instanceof Error ? error.message : 'Model installation failed.' })
-    }
-  }
-
-  async function cancelModelInstall() {
-    try {
-      if (await Engine.cancelInstall()) setEngineStatus({ state: 'not-installed', message: 'Download cancelled. No model was installed.' })
-    } catch (error) {
-      setEngineStatus({ state: 'error', message: error instanceof Error ? error.message : 'Could not cancel the model download.' })
-    }
-  }
-
-  async function unloadModel() {
-    setEngineStatus({ ...engineStatus, state: 'unloading', message: 'Unloading the conversation model.' })
-    try {
-      await Engine.unloadModel()
-      setEngineStatus({ ...engineStatus, state: 'installed', message: 'Conversation model unloaded. Sensor guidance remains available.' })
-    } catch (error) {
-      setEngineStatus({ ...engineStatus, state: 'error', message: error instanceof Error ? error.message : 'Could not unload the conversation model.' })
-    }
-  }
-
-  async function loadModel() {
-    setEngineStatus({ state: 'loading', installationId: engineStatus.installationId, message: 'Loading TensorFold into memory.' })
-    try {
-      const result = await Engine.loadModel(engineStatus.installationId)
-      setEngineStatus(result)
-    } catch (error) {
-      setEngineStatus({ state: 'error', installationId: engineStatus.installationId, message: error instanceof Error ? error.message : 'Model loading failed.' })
-    }
-  }
-
-  async function installVisionModel() {
-    setVisionStatus({ state: 'downloading', progress: 0, message: 'Preparing the visual model download.' })
-    try {
-      setVisionStatus(await Vision.installModel())
-    } catch (error) {
-      if (isInstallCancellation(error)) setVisionStatus({ state: 'not-installed', message: 'Download cancelled. No visual model was installed.' })
-      else setVisionStatus({ state: 'error', message: error instanceof Error ? error.message : 'Visual model installation failed.' })
-    }
-  }
-
-  async function cancelVisionInstall() {
-    try {
-      await Vision.cancelInstall()
-      setVisionStatus({ state: 'not-installed', message: 'Download cancelled. No visual model was installed.' })
-    } catch (error) {
-      setVisionStatus({ state: 'error', message: error instanceof Error ? error.message : 'Could not cancel the visual model download.' })
-    }
-  }
-
-  async function unloadVisionModel() {
-    setVisionStatus({ ...visionStatus, state: 'unloading', message: 'Unloading the visual model.' })
-    try {
-      await Vision.unloadModel()
-      setVisionStatus({ ...visionStatus, state: 'installed', message: 'Visual model unloaded.' })
-    } catch (error) {
-      setVisionStatus({ ...visionStatus, state: 'error', message: error instanceof Error ? error.message : 'Could not unload the visual model.' })
-    }
-  }
-
-  async function loadVisionModel() {
-    setVisionStatus({ state: 'loading', installationId: visionStatus.installationId, message: 'Loading SmolVLM2 into memory.' })
-    try {
-      setVisionStatus(await Vision.loadModel(visionStatus.installationId))
-    } catch (error) {
-      setVisionStatus({ state: 'error', installationId: visionStatus.installationId, message: error instanceof Error ? error.message : 'Visual model loading failed.' })
-    }
-  }
-
   useEffect(() => {
     mounted.current = true
-    void Promise.allSettled([Engine.getCapabilities(), Engine.getStatus(), Voice.getCapabilities(), Vision.getCapabilities(), Vision.getStatus()]).then(([engineCaps, storedStatus, voiceCaps, visionCaps, storedVisionStatus]) => {
+    void Voice.getCapabilities().then((value) => {
       if (!mounted.current) return
-      if (engineCaps.status === 'fulfilled') setEngine(engineCaps.value)
-      if (storedStatus.status === 'fulfilled') setEngineStatus(storedStatus.value)
-      if (voiceCaps.status === 'fulfilled') setVoice(voiceCaps.value)
-      if (voiceCaps.status === 'fulfilled') previousRoute.current = voiceCaps.value.route
-      if (visionCaps.status === 'fulfilled') setVision(visionCaps.value)
-      if (storedVisionStatus.status === 'fulfilled') setVisionStatus(storedVisionStatus.value)
-    })
+      setVoice(value)
+      previousRoute.current = value.route
+      voiceRecognition.current = value.onDeviceRecognition
+    }).catch(() => {})
     return () => { mounted.current = false }
   }, [])
 
   useEffect(() => {
-    if (settings.continuousListening) {
-      voiceRetryBlocked.current = false
-      void resumeListening()
-    }
-    else {
-      listeningRef.current = false
-      setListening(false)
-      void Voice.stopListening().catch(() => {})
-    }
-  }, [settings.continuousListening])
-
-  useEffect(() => {
-    const engineEvents = Engine.addEngineListener((event: Engine.EngineEvent) => {
-      if (event.status) setEngineStatus(event.status)
-      if (event.type === 'error' && event.message) setStatusMessage(event.message)
-    })
-    const visionEvents = Vision.addVisionListener((event: Vision.VisionEvent) => {
-      if (event.status) setVisionStatus(event.status)
-      if (event.type === 'error' && event.message) setStatusMessage(event.message)
-    })
     const perceptionEvents = Perception.addPerceptionListener((event: Perception.PerceptionEvent) => {
-      if (event.snapshot) {
+      if (event.snapshot && !pausing.current && (stateRef.current === 'starting' || stateRef.current === 'active' || stateRef.current === 'degraded')) {
+        if (event.snapshot.depthState === 'ready') depthExpected.current = true
         const healthy = event.snapshot.trackingReady && (!depthExpected.current || event.snapshot.depthState === 'ready')
         if (!healthy && stateRef.current === 'active') {
           sensorDegraded.current = true
@@ -456,24 +581,25 @@ export function GuidanceProvider({ children }: { children: ReactNode }) {
           updateState('active', 'Camera tracking and required depth are ready.')
           void speak('Camera tracking recovered.')
         }
-        snapshotRef.current = event.snapshot
         setSnapshot(event.snapshot)
       }
       if (event.warning) void handleWarning(event.warning)
-      if (event.type === 'lifecycle' && event.foreground === false && !voicePermissionPending.current && (stateRef.current === 'active' || stateRef.current === 'degraded')) void pause(true)
+      if (event.type === 'lifecycle' && event.foreground === false && !voicePermissionPending.current && !locationPermissionPending.current && (locationRequest.current || stateRef.current === 'active' || stateRef.current === 'degraded')) void pause(true)
       if (event.message) setStatusMessage(event.message)
     })
     const voiceEvents = Voice.addVoiceListener((event: Voice.VoiceEvent) => {
-      if (event.type === 'final' && event.text && !processingRequest.current) transcriptAction.current(event.text)
+      if (event.type === 'final' && event.text && !textEntry.current && !pausing.current && !processingRequest.current && (stateRef.current === 'active' || stateRef.current === 'degraded')) transcriptAction.current(event.text)
       if (event.type === 'listeningStopped') {
         listeningRef.current = false
         setListening(false)
-        void resumeListening()
+        void resumeListeningRef.current()
       }
       if (event.type === 'speechFinished' || event.type === 'speechStopped') {
+        if (event.utteranceId && event.utteranceId !== speechId.current) return
+        speechId.current = undefined
         speakingRef.current = false
         setSpeaking(false)
-        void resumeListening()
+        void resumeListeningRef.current()
       }
       if (event.type === 'routeChanged' && event.route) {
         setVoice((current) => current ? { ...current, route: event.route! } : current)
@@ -483,27 +609,33 @@ export function GuidanceProvider({ children }: { children: ReactNode }) {
         }
         previousRoute.current = event.route
       }
-      if (event.type === 'error' && event.message) setStatusMessage(event.message)
+      if (event.type === 'error' && event.message && !silenceCodes.has(event.code ?? '') && !pausing.current) {
+        if (event.operation === 'recognition' || event.operation === 'startListening') {
+          voiceRetryBlocked.current = true
+          setSessionMode(false)
+        }
+        if (event.code === 'ERR_RECOGNITION_MODEL_MISSING') setVoiceModelMissing(true)
+        setVoiceNotice(event.message)
+      }
     })
     return () => {
       pausing.current = true
       processingRequest.current = undefined
-      engineEvents.remove()
+      locationRequest.current?.abort()
       perceptionEvents.remove()
-      visionEvents.remove()
       voiceEvents.remove()
       void Promise.allSettled([Perception.stopSession(), Voice.stopListening(), Voice.stopSpeaking(), Haptics.stop()])
     }
     // Subscribe once; handlers read changing settings and session state through refs.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
-
   const controller: GuidanceController = {
-    state, statusMessage, listening, speaking, processing: processingRequest.current !== undefined, lastAnswer, lastTranscript, snapshot,
-    engine, engineStatus, vision, visionStatus, voice,
-    installModel, loadModel, cancelModelInstall, unloadModel,
-    installVisionModel, loadVisionModel, cancelVisionInstall, unloadVisionModel,
-    start, stop: pause, ask, repeat, stopSpeech,
+    state, startPending, cameraPermissionBlocked, statusMessage, listening, handsFree, speaking, questionPhase, voiceNotice,
+    voiceModelMissing, speechDownloadPending, warning, lastReply, snapshot, shoppingList,
+    engine, engineStatus, vision: visual.capabilities, visionStatus: visual.status, voice,
+    ...engineControls,
+    prepareVisionModel: visual.prepare, cancelVisionInstall: visual.cancelInstall, unloadVisionModel: visual.unload,
+    start, stop: pause, ask, enableHandsFree, downloadOfflineSpeech, stopListeningInput, setTextEntry, repeat, checkAgain, checkLabel, stopSpeech,
   }
 
   return <Context.Provider value={controller}>{children}</Context.Provider>

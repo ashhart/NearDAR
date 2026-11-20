@@ -1,4 +1,6 @@
-export type SessionState = 'idle' | 'starting' | 'active' | 'degraded' | 'paused' | 'error'
+import type { Errand } from './errands'
+
+export type SessionState = 'idle' | 'starting' | 'active' | 'degraded' | 'stopping' | 'paused' | 'error'
 export type DepthState = 'unavailable' | 'starting' | 'ready' | 'stale' | 'limited' | 'lost'
 export type Direction = 'ahead' | 'ahead-left' | 'ahead-right' | 'left' | 'right' | 'behind' | 'unknown'
 
@@ -39,6 +41,7 @@ export interface SceneSnapshot {
   objects: SceneObject[]
   freeSeats: SeatCandidate[]
   recognizedText: string[]
+  textObservations?: { text: string; direction: Direction }[]
   imageBase64?: string
   temporaryImagePath?: string
   notes: string[]
@@ -73,6 +76,7 @@ export interface VoiceCapabilities {
 
 export interface GuidanceSettings {
   onboardingComplete: boolean
+  companionName: string
   stepLengthMeters: number
   speechRate: number
   urgentHaptics: boolean
@@ -80,14 +84,29 @@ export interface GuidanceSettings {
   continuousListening: boolean
 }
 
+export interface GuidanceReply {
+  text: string
+  question?: string
+  source?: 'view' | 'location'
+  detail?: string
+  errand?: Errand
+}
+
 export interface GuidanceController {
   state: SessionState
+  startPending: boolean
+  cameraPermissionBlocked: boolean
   statusMessage: string
   listening: boolean
+  handsFree: boolean
   speaking: boolean
-  processing: boolean
-  lastAnswer: string
-  lastTranscript: string
+  questionPhase: 'loading-model' | 'capturing' | 'looking' | 'answering' | 'locating' | null
+  voiceNotice?: string
+  voiceModelMissing: boolean
+  speechDownloadPending: boolean
+  warning?: SceneWarning
+  lastReply?: GuidanceReply
+  shoppingList: string[]
   snapshot?: SceneSnapshot
   engine?: EngineCapabilities
   engineStatus: EngineStatus
@@ -98,13 +117,18 @@ export interface GuidanceController {
   loadModel(): Promise<void>
   cancelModelInstall(): Promise<void>
   unloadModel(): Promise<void>
-  installVisionModel(): Promise<void>
-  loadVisionModel(): Promise<void>
+  prepareVisionModel(): Promise<boolean>
   cancelVisionInstall(): Promise<void>
   unloadVisionModel(): Promise<void>
-  start(): Promise<void>
-  stop(): Promise<void>
+  start(handsFree?: boolean): Promise<void>
+  stop(silent?: boolean): Promise<void>
   ask(question?: string): Promise<void>
+  enableHandsFree(): void
+  downloadOfflineSpeech(): Promise<void>
+  stopListeningInput(): void
+  setTextEntry(active: boolean): void
   repeat(): Promise<void>
+  checkAgain(): Promise<void>
+  checkLabel(): Promise<void>
   stopSpeech(): Promise<void>
 }

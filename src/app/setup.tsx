@@ -1,42 +1,71 @@
-import { useEffect, useState } from 'react'
-import { View } from 'react-native'
+import { useEffect, useRef, useState } from 'react'
+import { AccessibilityInfo, Image, StyleSheet, View, useWindowDimensions } from 'react-native'
 import { router } from 'expo-router'
-import { useAppSettings } from '../lib/SettingsContext'
-import { Body, Button, Heading, Label, Screen, SonarMark, StatusCard } from '../components/ui'
+import { Body, Button, Heading, Screen, TopBar, useColors } from '../components/ui'
+import { VisionModelCard } from '../components/VisionModelCard'
 import * as Voice from '../../modules/tensorfold-voice/src'
+import { useAppSettings } from '../lib/SettingsContext'
+import { useGuidance } from '../lib/guidance/useGuidance'
 
 export default function Setup() {
   const { settings, update } = useAppSettings()
-  const [speechError, setSpeechError] = useState<string | null>(null)
+  const { vision, visionStatus } = useGuidance()
+  const colors = useColors()
+  const { fontScale, width } = useWindowDimensions()
+  const photoHeight = Math.round((Math.min(width, 550) - 40) / 1.6)
+  const [continuing, setContinuing] = useState(false)
+  const leaving = useRef(false)
+  const mounted = useRef(true)
+  const waitingForDownload = visionStatus.state === 'downloading' || visionStatus.state === 'loading'
+  const hasDownload = visionStatus.state === 'installed' || visionStatus.state === 'ready'
 
   useEffect(() => {
-    void Voice.speak('Welcome to Sonar. Point your camera and ask what is around you. Use AirPods, headphones, or your phone speaker. Keep using your usual mobility aid. Start Sonar when you are ready.', {
-      rate: settings.speechRate, priority: 'answer', interrupt: true, speakerFallback: settings.speakerFallback,
-    }).catch((error: unknown) => setSpeechError(error instanceof Error ? error.message : 'Spoken setup is unavailable.'))
-    return () => { void Voice.stopSpeaking().catch(() => {}) }
+    mounted.current = true
+    let started = false
+    void AccessibilityInfo.isScreenReaderEnabled().then((enabled) => {
+      if (!mounted.current || enabled) return
+      started = true
+      return Voice.speak('Welcome to NearDAR. Download offline descriptions, then choose Start hands-free to ask about what’s nearby. You can say stop camera at any time while it’s listening.', {
+        rate: settings.speechRate, priority: 'answer', interrupt: true, speakerFallback: settings.speakerFallback,
+      })
+    }).catch(() => {})
+    return () => {
+      mounted.current = false
+      if (started) void Voice.stopSpeaking().catch(() => {})
+    }
   }, [settings.speechRate, settings.speakerFallback])
 
   async function finish() {
-    await update({ onboardingComplete: true })
-    router.replace('/guide')
+    if (leaving.current || !mounted.current) return
+    leaving.current = true
+    setContinuing(true)
+    await update({ onboardingComplete: true }).catch(() => {})
+    if (mounted.current) router.replace('/guide')
   }
 
-  return <Screen>
-    <Heading small>Sonar</Heading>
-    <View style={{ alignItems: 'center', gap: 10, paddingVertical: 10 }}>
-      <SonarMark active size={200} />
-      <Label center>Your surroundings, spoken</Label>
-      <Heading center>Hear what’s around you.</Heading>
-      <Body center>Point your camera. Ask naturally. Sonar describes nearby objects, seats, text, and obstacles through AirPods or your phone speaker.</Body>
+  const continueLabel = waitingForDownload ? 'Open NearDAR while preparing' : vision?.available && !hasDownload ? 'Continue without download' : 'Continue to NearDAR'
+
+  return <Screen footer={<Button label={continueLabel} secondary={!!vision?.available && !hasDownload} icon="arrow-forward" hint="Choose Start hands-free or Start camera on the next screen." busy={continuing} onPress={() => void finish()} />}>
+    <TopBar />
+    <View style={styles.intro}>
+      <Heading editorial focusOnEntry>Hear what’s around you.</Heading>
+      <Body muted>Point your iPhone or Android camera and ask what’s nearby. Look for a seat, find an object, or read text aloud.</Body>
     </View>
-
-    <StatusCard title="Before you start">
-      <Body>Keep using your cane, guide dog, and mobility training. Sonar can miss hazards and never decides when it is safe to cross.</Body>
-      <Body muted>Images and voice stay on your device. During guidance, Sonar listens again after each answer. Pause to stop the camera and microphone.</Body>
-      {speechError ? <Body>{speechError} You can continue with VoiceOver or TalkBack.</Body> : null}
-    </StatusCard>
-
-    <Button label="Start Sonar" hint="Starts the camera and spoken guidance on the next screen" onPress={() => void finish()} />
-    <Body muted center>No account. No cloud guidance.</Body>
+    {fontScale < 1.5 && <Image
+      source={require('../../assets/neardar-welcome.jpg')}
+      accessible={false}
+      aria-hidden
+      accessibilityElementsHidden
+      importantForAccessibility="no-hide-descendants"
+      resizeMode="cover"
+      style={[styles.photo, { height: photoHeight, backgroundColor: colors.raised }]}
+    />}
+    <VisionModelCard onReady={() => void finish()} />
+    <Body muted>Keep using your usual mobility aid. NearDAR can miss hazards.</Body>
   </Screen>
 }
+
+const styles = StyleSheet.create({
+  intro: { gap: 10, paddingTop: 4 },
+  photo: { width: '100%', borderRadius: 20 },
+})

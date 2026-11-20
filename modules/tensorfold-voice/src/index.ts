@@ -100,6 +100,7 @@ export type VoiceEvents = {
 declare class TensorFoldVoiceNativeModule extends NativeModule<VoiceEvents> {
   getCapabilities(): Promise<VoiceCapabilities>;
   startListening(options?: ListeningOptions): Promise<{ sessionId: string; locale: string }>;
+  downloadOfflineRecognition?(): Promise<'ready' | 'requested'>;
   stopListening(): Promise<void>;
   speak(text: string, options?: SpeakOptions): Promise<{
     utteranceId: string;
@@ -157,6 +158,11 @@ export function startListening(options: ListeningOptions = {}): Promise<{ sessio
 
 export function stopListening(): Promise<void> {
   return Voice.stopListening();
+}
+
+export function downloadOfflineRecognition(): Promise<'ready' | 'requested'> {
+  return Voice.downloadOfflineRecognition?.() ??
+    Promise.reject(new Error('Download offline speech in your phone’s speech settings.'));
 }
 
 export function speak(text: string, options: SpeakOptions = {}): Promise<{

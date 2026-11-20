@@ -1,6 +1,6 @@
 import { type EventSubscription, requireOptionalNativeModule } from 'expo-modules-core'
 import { createDefaultManifest, defaultModelId } from './manifest'
-import type { EngineEvent, EngineGenerationRequest, EngineStatus, InstallManifest, NativeTensorFoldEngine } from './types'
+import type { EngineEvent, EngineStatus, InstallManifest, NativeTensorFoldEngine } from './types'
 
 const unavailableMessage = 'TensorFold native inference is unavailable on this platform. Install the iOS or Android development build.'
 const unavailable: NativeTensorFoldEngine = {

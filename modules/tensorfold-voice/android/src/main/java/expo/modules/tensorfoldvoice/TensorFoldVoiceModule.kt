@@ -120,6 +120,17 @@ class TensorFoldVoiceModule : Module() {
       }
     }.runOnQueue(Queues.MAIN)
 
+    AsyncFunction("downloadOfflineRecognition") { promise: Promise ->
+      try {
+        requireInitialized()
+        recognition.downloadOfflineModel(promise)
+      } catch (error: Exception) {
+        promise.reject(error as? VoiceException ?: VoiceException(
+          "ERR_RECOGNITION_DOWNLOAD_FAILED", "Offline speech download could not start.", error
+        ))
+      }
+    }.runOnQueue(Queues.MAIN)
+
     AsyncFunction("speak") { text: String, options: SpeakOptions ->
       nativeCall("speak", options.utteranceId) {
         requireInitialized()

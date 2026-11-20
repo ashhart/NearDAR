@@ -94,6 +94,7 @@ export interface SceneSnapshot {
   objects: SceneObject[];
   freeSeats: SeatCandidate[];
   recognizedText: string[];
+  textObservations?: { text: string; direction: Direction }[];
   imageBase64?: string;
   /** Owned temporary URI. Call releaseCapture after the vision engine finishes with it. */
   temporaryImagePath?: string;

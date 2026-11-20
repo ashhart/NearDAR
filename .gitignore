@@ -14,3 +14,21 @@ vendor/TensorFold/
 coverage/
 modules/tensorfold-vision/ios/vendor/
 modules/tensorfold-engine/ios/vendor/
+
+# Local diagnostics, credentials, signing material, and build exports
+/src/app/engine-probe.tsx
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.mobileprovision
+*.apk
+*.aab
+*.ipa
+*.xcuserstate
+xcuserdata/
+*.dSYM/
+__pycache__/
+*.pyc

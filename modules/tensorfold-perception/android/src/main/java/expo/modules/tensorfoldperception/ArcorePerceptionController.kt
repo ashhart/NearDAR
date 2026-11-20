@@ -579,14 +579,12 @@ class ArcorePerceptionController(
     val output = mutableListOf<Map<String, Any>>()
     for (block in result.textBlocks) {
       for (line in block.lines) {
-        for (element in line.elements) {
-          val rect = element.boundingBox ?: continue
-          val bounds = SceneImage.sensorBounds(rect, image.width, image.height, rotation)
-          output.add(mapOf(
-            "text" to element.text, "confidence" to (element.confidence?.toDouble() ?: 0.0),
-            "bounds" to bounds, "direction" to cameraOnlyDirection(bounds)
-          ))
-        }
+        val rect = line.boundingBox ?: continue
+        val bounds = SceneImage.uprightBounds(rect, image.width, image.height, rotation)
+        output.add(mapOf(
+          "text" to line.text, "confidence" to (line.confidence?.toDouble() ?: 0.0),
+          "bounds" to bounds, "direction" to cameraOnlyDirection(bounds)
+        ))
       }
     }
     return output
@@ -615,17 +613,15 @@ class ArcorePerceptionController(
     val output = mutableListOf<Map<String, Any>>()
     for (block in result.textBlocks) {
       for (line in block.lines) {
-        for (element in line.elements) {
-          val rect = element.boundingBox ?: continue
-          val bounds = SceneImage.sensorBounds(rect, image.width, image.height, rotation)
-          val measurement = if (depthImage != null) analyzer.measure(depthImage, confidenceImage, bounds, frame.camera.imageIntrinsics) else null
-          val item = mutableMapOf<String, Any>(
-            "text" to element.text, "confidence" to (element.confidence?.toDouble() ?: 0.0),
-            "bounds" to bounds, "direction" to (measurement?.direction ?: analyzer.directionForBounds(bounds, frame.camera.imageIntrinsics))
-          )
-          measurement?.distance?.let { item["distanceMeters"] = it }
-          output.add(item)
-        }
+        val rect = line.boundingBox ?: continue
+        val bounds = SceneImage.sensorBounds(rect, image.width, image.height, rotation)
+        val measurement = if (depthImage != null) analyzer.measure(depthImage, confidenceImage, bounds, frame.camera.imageIntrinsics) else null
+        val item = mutableMapOf<String, Any>(
+          "text" to line.text, "confidence" to (line.confidence?.toDouble() ?: 0.0),
+          "bounds" to bounds, "direction" to cameraOnlyDirection(SceneImage.uprightBounds(rect, image.width, image.height, rotation))
+        )
+        measurement?.distance?.let { item["distanceMeters"] = it }
+        output.add(item)
       }
     }
     return output

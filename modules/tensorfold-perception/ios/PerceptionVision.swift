@@ -90,12 +90,13 @@ enum PerceptionVision {
       let bounds = sensorBounds(observation.boundingBox, orientation: orientation)
       let measure = Geometry.measure(depth: frame.sceneDepth,
         bounds: bounds, intrinsics: frame.camera.intrinsics, resolution: frame.camera.imageResolution, settings: settings)
-      let nx = bounds["x"]! + bounds["width"]! / 2
-      let ny = bounds["y"]! + bounds["height"]! / 2
-      let direction = measure?.direction ?? Geometry.direction(normalizedX: nx, normalizedY: ny, distance: 1,
-        intrinsics: frame.camera.intrinsics, imageWidth: Int(frame.camera.imageResolution.width), imageHeight: Int(frame.camera.imageResolution.height))
+      let box = observation.boundingBox
+      let horizontal = box.midX < 1.0 / 3 ? "left" : box.midX > 2.0 / 3 ? "right" : nil
+      let vertical = box.midY > 2.0 / 3 ? "upper" : box.midY < 1.0 / 3 ? "lower" : nil
+      let bearing = [vertical, horizontal].compactMap { $0 }.joined(separator: "-")
       var result: [String: Any] = [
-        "text": candidate.string, "confidence": Double(candidate.confidence), "bounds": bounds, "direction": direction
+        "text": candidate.string, "confidence": Double(candidate.confidence), "bounds": bounds,
+        "direction": ["bearing": bearing.isEmpty ? "ahead" : bearing]
       ]
       if let distance = measure?.distance { result["distanceMeters"] = distance }
       return result

@@ -3,8 +3,8 @@ import type { Direction, SceneObject, SceneSnapshot } from './types'
 
 const unsupportedClaims = /\b(safe to|path is clear|all clear|clear to cross|safe to cross|no obstacles|no hazards|nothing in front|you can go|walk forward|move forward|cross now|definitely empty|definitely free)\b/i
 
-export function objectPhrase(object: SceneObject): string {
-  const direction = {
+export function directionPhrase(direction: Direction): string {
+  return {
     'ahead': 'ahead',
     'ahead-left': 'ahead to your left',
     'ahead-right': 'ahead to your right',
@@ -12,16 +12,24 @@ export function objectPhrase(object: SceneObject): string {
     'right': 'to your right',
     'behind': 'behind you',
     'unknown': 'in view',
-  }[object.direction]
+  }[direction]
+}
+
+function distancePhrase(object: SceneObject): string {
   let distance = ''
   if (typeof object.stepEstimate === 'number' && Number.isFinite(object.stepEstimate) && object.stepEstimate > 0) {
     const steps = Math.max(1, Math.round(object.stepEstimate))
-    distance = `, about ${steps === 1 ? 'one step' : `${steps} steps`}`
+    distance = `about ${steps === 1 ? 'one step' : `${steps} steps`}`
   } else if (typeof object.distanceMeters === 'number' && Number.isFinite(object.distanceMeters) && object.distanceMeters > 0) {
-    distance = `, about ${object.distanceMeters < 1 ? 'less than a metre' : `${Math.round(object.distanceMeters)} metres`}`
+    distance = object.distanceMeters < 1 ? 'less than a metre' : `about ${Math.round(object.distanceMeters)} metres`
   }
+  return distance
+}
+
+export function objectPhrase(object: SceneObject): string {
   const prefix = object.evidence.includes('on-device-vlm') ? 'Looks like ' : ''
-  return `${prefix}${object.label} ${direction}${distance}`
+  const distance = distancePhrase(object)
+  return `${prefix}${object.label} ${directionPhrase(object.direction)}${distance ? `, ${distance}` : ''}`
 }
 
 export function sensorLimit(snapshot?: SceneSnapshot, allowFrozen = false): string | null {
@@ -31,26 +39,37 @@ export function sensorLimit(snapshot?: SceneSnapshot, allowFrozen = false): stri
   return null
 }
 
-export function answerAhead(snapshot?: SceneSnapshot, allowFrozen = false): string {
+export function answerAhead(snapshot?: SceneSnapshot, allowFrozen = false, side?: 'left' | 'right'): string {
   const limit = sensorLimit(snapshot, allowFrozen)
   if (limit) return limit
-  const objects = [...snapshot!.objects]
+  const objects = [...snapshot!.objects, ...snapshot!.freeSeats]
+    .filter((object) => !side || object.direction === side || object.direction === `ahead-${side}`)
     .filter((object) => object.confidence >= 0.4 || object.evidence.includes('on-device-vlm'))
     .sort((left, right) => (left.distanceMeters ?? Infinity) - (right.distanceMeters ?? Infinity))
     .slice(0, 3)
-  if (objects.length === 0) return 'I cannot confidently name anything in this view. Move the camera slowly for another look.'
+  if (objects.length === 0) return side
+    ? `I cannot confidently name anything on your ${side} in this view.`
+    : 'I cannot confidently name anything in this view. Move the camera slowly for another look.'
   return objects.map(objectPhrase).join('. ') + '.'
 }
 
-export function answerSeats(snapshot?: SceneSnapshot, allowFrozen = false): string {
+export function answerSeats(snapshot?: SceneSnapshot, allowFrozen = false, guided = false): string {
   const limit = sensorLimit(snapshot, allowFrozen)
   if (limit) return limit
-  if (snapshot!.freeSeats.length === 0) {
-    return 'I cannot confidently identify a free seat in this view. A seat outside the camera view or hidden behind someone may not be detected.'
+  const matched = snapshot!.freeSeats
+    .filter((seat) => seat.free && seat.evidence.includes('on-device-vlm'))
+    .sort((first, second) => (first.distanceMeters ?? Infinity) - (second.distanceMeters ?? Infinity))[0]
+  if (matched) {
+    const distance = distancePhrase(matched)
+    return `A ${matched.label} ${directionPhrase(matched.direction)}${distance ? `, ${distance} away,` : ''} appears unoccupied. Check before sitting.`
   }
-  return snapshot!.freeSeats.slice(0, 3).map((seat) => {
-    return `${objectPhrase(seat)}, appears unoccupied from this camera view`
-  }).join('. ') + '. Check locally before sitting.'
+  const visible = snapshot!.objects.find((object) => /^(chair|seat|bench|stool)$/.test(object.label))
+  if (visible) {
+    const next = guided ? 'Point the camera at the whole seat and say “check again”.' : 'Ask someone nearby to confirm.'
+    return `There appears to be a ${visible.label} ${directionPhrase(visible.direction)}. I can’t tell if it’s free. ${next}`
+  }
+  return guided ? 'I can’t confirm a free seat in this view. Aim the camera across the seating area and say “check again”.'
+    : 'I cannot confidently identify a free seat in this view. Point the camera toward the seating, or ask someone nearby.'
 }
 
 export function answerText(snapshot?: SceneSnapshot, allowFrozen = false): string {
@@ -60,20 +79,66 @@ export function answerText(snapshot?: SceneSnapshot, allowFrozen = false): strin
   return snapshot!.recognizedText.join(' ').slice(0, 2_000)
 }
 
+export function wordTokens(value: string): string[] {
+  const words = value.toLowerCase()
+    .replace(/\bcheck[- ]?outs?\b|\bcash registers?\b/g, 'checkout')
+    .match(/[a-z0-9]+/g) ?? []
+  return words.map((word) => {
+    if (word.length < 4) return word
+    if (/ies$/.test(word)) return word.slice(0, -3) + 'y'
+    if (/(?:oes|ses|xes|ches|shes|zes)$/.test(word)) return word.slice(0, -2)
+    return /[^s]s$/.test(word) ? word.slice(0, -1) : word
+  })
+}
+
+export function requestedObjectName(question: string): string | undefined {
+  const target = /\b(?:find|locate|look for|where(?:['’]s| (?:is|are))|is there|are there|do you see|can you see)\s+(.+)/i.exec(question)?.[1]
+  return target
+    ?.trim()
+    .replace(/^(?:me )?(?:a |an |the |some |my |our |any )?/i, '')
+    .replace(/\b(?:on|to) (?:my|the|your) (?:left|right)\b|\b(?:near me|in this view|for me|please)\b/gi, '')
+    .replace(/\b(?:is|are)\s*[?!.]*$/i, '')
+    .replace(/[?!.]+$/, '')
+    .trim()
+}
+
+export function requestedObject(question: string): string[] {
+  return wordTokens(requestedObjectName(question) ?? '')
+}
+
+export function requestedSide(question: string): 'left' | 'right' | undefined {
+  const side = /\b(?:on|to) (?:my|the|your) (left|right)\b/i.exec(question)?.[1]?.toLowerCase()
+  return side === 'left' || side === 'right' ? side : undefined
+}
+
+export function wordsMatch(text: string, target: string[]): boolean {
+  const words = new Set(wordTokens(text))
+  return target.every((word) => words.has(word))
+}
+
+export function objectMatches(object: SceneObject, target: string[]): boolean {
+  return (object.confidence >= 0.4 || object.evidence.includes('on-device-vlm')) && wordsMatch(object.label, target)
+}
+
 export function answerQuestion(question: string, snapshot?: SceneSnapshot, allowFrozen = false): string {
-  if (!/\b(where|find|locate|look for|is there|are there|do you see|can you see)\b/i.test(question)) return answerAhead(snapshot, allowFrozen)
+  const side = requestedSide(question)
+  const target = requestedObject(question)
+  if (!target.length) {
+    return answerAhead(snapshot, allowFrozen, side)
+  }
   if (/\b(unoccupied|vacant|free seat|seat free|can i sit|place to sit)\b/i.test(question)) return answerSeats(snapshot, allowFrozen)
   const limit = sensorLimit(snapshot, allowFrozen)
   if (limit) return limit
-  const words = new Set(question.toLowerCase().match(/[a-z]+/g) || [])
-  const matches = [...snapshot!.objects, ...snapshot!.freeSeats].filter((object) => {
-    if (object.confidence < 0.4 && !object.evidence.includes('on-device-vlm')) return false
-    const labelWords = object.label.toLowerCase().match(/[a-z]+/g) || []
-    return labelWords.length > 0 && labelWords.every((word) => words.has(word) || words.has(`${word}s`))
-  })
+  const matchesSide = (direction: Direction) => !side || direction === side || direction === `ahead-${side}`
+  const text = (snapshot!.textObservations ?? snapshot!.recognizedText.map((text) => ({ text, direction: 'unknown' as const })))
+    .find((observation) => matchesSide(observation.direction) && wordsMatch(observation.text, target))
+  if (text) return `I can read “${text.text.trim().slice(0, 110)}” ${directionPhrase(text.direction)}.`
+
+  const matches = [...snapshot!.objects, ...snapshot!.freeSeats].filter((object) =>
+    matchesSide(object.direction) && objectMatches(object, target))
   const unique = [...new Map(matches.map((object) => [object.id, object])).values()].slice(0, 3)
   if (unique.length === 0) return 'I cannot confidently locate the requested object in this view. Point the camera toward it and ask again.'
-  return unique.map(objectPhrase).join('. ') + '.'
+  return unique.map((object) => object.evidence.includes('on-device-vlm') ? objectPhrase({ ...object, distanceMeters: undefined, stepEstimate: undefined }) : objectPhrase(object)).join('. ') + '.'
 }
 
 export function buildGenerationRequest(question: string, snapshot: SceneSnapshot, requestId: string): EngineGenerationRequest {

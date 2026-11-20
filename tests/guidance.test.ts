@@ -16,6 +16,19 @@ const snapshot: SceneSnapshot = {
 describe('voice commands', () => {
   test('separates navigation and conversation commands', () => {
     expect(parseIntent('Find an empty chair')).toEqual({ kind: 'seat' })
+    expect(parseIntent('Help me find a seat')).toEqual({ kind: 'seat' })
+    expect(parseIntent('Stop listening')).toEqual({ kind: 'stop-listening' })
+    expect(parseIntent('Stop camera')).toEqual({ kind: 'stop-session' })
+    expect(parseIntent('Check again')).toEqual({ kind: 'check-again' })
+    expect(parseIntent('What can I ask?')).toEqual({ kind: 'voice-help' })
+    expect(parseIntent('Look left')).toEqual({ kind: 'question', question: 'What is on my left?' })
+    expect(parseIntent('Check to my right.')).toEqual({ kind: 'question', question: 'What is on my right?' })
+    expect(parseIntent('At a restaurant, which seat should I sit at?')).toEqual({ kind: 'seat' })
+    expect(parseIntent('Where can we sit?')).toEqual({ kind: 'seat' })
+    expect(parseIntent('Read the menu')).toEqual({ kind: 'read' })
+    expect(parseIntent('Where am I?')).toEqual({ kind: 'location' })
+    expect(parseIntent('Call me Maya.')).toEqual({ kind: 'remember-name', name: 'Maya' })
+    expect(parseIntent('Forget my name')).toEqual({ kind: 'forget-name' })
     expect(parseIntent('stop')).toEqual({ kind: 'stop-speech' })
     expect(parseIntent('Pause guidance')).toEqual({ kind: 'stop-session' })
     expect(parseIntent('Where is the checkout?')).toEqual({ kind: 'question', question: 'Where is the checkout?' })
@@ -23,6 +36,13 @@ describe('voice commands', () => {
 })
 
 describe('grounded scene speech', () => {
+  test('answers a typed question about one side using only objects on that side', () => {
+    const leftObject: SceneObject = { ...lamppost, id: 'vision-left', label: 'chair', direction: 'ahead-left', distanceMeters: undefined, stepEstimate: undefined, evidence: ['on-device-vlm'] }
+    const view = { ...snapshot, objects: [lamppost, leftObject] }
+    expect(answerQuestion('What’s on my left?', view)).toBe('Looks like chair ahead to your left.')
+    expect(answerQuestion('Is there a lamppost to my left?', view)).not.toContain('lamppost')
+  })
+
   test('speaks the supplied obstacle direction and coarse step estimate', () => {
     expect(objectPhrase(lamppost)).toBe('lamppost to your right, about 2 steps')
     expect(answerAhead(snapshot)).toContain('lamppost to your right')
@@ -79,6 +99,20 @@ describe('grounded scene speech', () => {
     expect(answerQuestion('Where is the milk?', crowded)).toContain('cannot confidently locate the requested object')
   })
 
+  test('finds beans using package text and qualifies a visual-only product without borrowing distance', () => {
+    const view = { ...snapshot, textObservations: [{ text: 'BAKED BEANS', direction: 'ahead-left' as const }] }
+    expect(answerQuestion('Help me find beans', view)).toBe('I can read “BAKED BEANS” ahead to your left.')
+    const can = { ...lamppost, label: 'canned beans', evidence: ['on-device-vlm'] }
+    expect(answerQuestion('Help me find beans', { ...snapshot, objects: [can] })).toBe('Looks like canned beans to your right.')
+    expect(answerQuestion('Help me find green beans', view)).toContain('cannot confidently locate')
+  })
+
+  test('reports the checkout sign direction without suggesting a route', () => {
+    const view = { ...snapshot, textObservations: [{ text: 'CHECKOUTS →', direction: 'right' as const }] }
+    expect(answerQuestion('Help me find the checkout', view)).toBe('I can read “CHECKOUTS →” to your right.')
+    expect(answerQuestion('Find the check-out near me', view)).toContain('“CHECKOUTS →”')
+  })
+
   test('allows a fresh capture to be described after slow inference without treating an old capture as fresh', () => {
     const lateSnapshot = { ...snapshot, observedAt: Date.now() - 10_000 }
     expect(answerAhead(lateSnapshot)).toContain('stale')
@@ -96,16 +130,18 @@ describe('visual model grounding', () => {
 
   test('reports an unmatched visual object without inventing distance', () => {
     const enriched = mergeVisionEvidence('{"objects":[{"label":"chair","direction":"center"}],"unoccupiedSeats":[],"uncertainty":"One chair"}', { ...snapshot, objects: [] })
-    expect(answerAhead(enriched)).toBe('Looks like chair ahead.')
+    expect(answerAhead(enriched)).toBe('Looks like chair in view.')
     expect(enriched.objects[0]?.distanceMeters).toBeUndefined()
     expect(enriched.objects[0]?.stepEstimate).toBeUndefined()
   })
 
-  test('accepts a line-format seat label without accepting appearance-only availability', () => {
+  test('accepts a line-format seat label without trusting model-only direction or availability', () => {
     const cameraOnly = { ...snapshot, depthState: 'unavailable' as const, objects: [] }
-    const enriched = mergeVisionEvidence('unoccupied chair | center', cameraOnly)
-    expect(enriched.objects).toMatchObject([{ label: 'chair', direction: 'ahead', evidence: ['on-device-vlm'] }])
-    expect(answerAhead(enriched)).toBe('Looks like chair ahead.')
+    const enriched = mergeVisionEvidence('unoccupied chair | left', cameraOnly)
+    expect(enriched.objects).toMatchObject([{ label: 'chair', direction: 'unknown', evidence: ['on-device-vlm'] }])
+    expect(answerAhead(enriched)).toBe('Looks like chair in view.')
+    expect(answerAhead(enriched, false, 'left')).toBe('I cannot confidently name anything on your left in this view.')
+    expect(answerSeats(enriched)).toBe('There appears to be a chair in view. I can’t tell if it’s free. Ask someone nearby to confirm.')
     expect(enriched.freeSeats).toHaveLength(0)
     expect(enriched.objects[0]?.distanceMeters).toBeUndefined()
     expect(enriched.objects[0]?.stepEstimate).toBeUndefined()
@@ -115,7 +151,7 @@ describe('visual model grounding', () => {
     const chair: SceneObject = { id: 'chair-1', label: 'chair', confidence: 0.8, direction: 'left', distanceMeters: 1.4, stepEstimate: 2, evidence: ['detector', 'depth'], occupied: false }
     const enriched = mergeVisionEvidence('unoccupied chair | left', { ...snapshot, objects: [chair] })
     expect(enriched.freeSeats).toHaveLength(1)
-    expect(answerSeats(enriched)).toContain('about 2 steps, appears unoccupied')
+    expect(answerSeats(enriched)).toContain('about 2 steps away, appears unoccupied')
   })
 
   test('rejects line-format output mixed with unvalidated prose', () => {
@@ -147,7 +183,7 @@ describe('visual model grounding', () => {
     const enriched = mergeVisionEvidence('{"objects":[{"label":"chair","direction":"center"}],"unoccupiedSeats":[{"label":"chair","direction":"center"}],"uncertainty":"Seat fully visible"}', { ...snapshot, objects: [chair] })
     expect(enriched.freeSeats).toHaveLength(1)
     expect(enriched.freeSeats[0]?.occupancyConfidence).toBeUndefined()
-    expect(answerSeats(enriched)).toContain('Looks like chair ahead, about 2 steps, appears unoccupied')
+    expect(answerSeats(enriched)).toBe('A chair ahead, about 2 steps away, appears unoccupied. Check before sitting.')
   })
 
   test('does not turn a Camera2 VLM-only chair into geometric free-seat evidence', () => {
@@ -155,7 +191,21 @@ describe('visual model grounding', () => {
     const enriched = mergeVisionEvidence('{"objects":[{"label":"chair","direction":"center"}],"unoccupiedSeats":[{"label":"chair","direction":"center"}],"uncertainty":"Appearance only"}', cameraOnly)
     expect(enriched.freeSeats).toHaveLength(0)
     expect(enriched.objects.every((object) => !object.evidence.includes('depth-or-tracked-seat'))).toBe(true)
-    expect(answerSeats(enriched)).toContain('cannot confidently identify a free seat')
+    expect(answerSeats(enriched)).toContain('There appears to be a chair in view. I can’t tell if it’s free.')
+  })
+
+  test('does not borrow a generic obstacle distance for a restaurant chair', () => {
+    const obstacle = { ...lamppost, label: 'obstacle' }
+    const view = mergeVisionEvidence('unoccupied chair | right', { ...snapshot, objects: [obstacle] })
+    expect(view.freeSeats).toHaveLength(0)
+    expect(answerSeats(view)).toContain('There appears to be a chair in view. I can’t tell if it’s free.')
+  })
+
+  test('conflicting and obscured seats never become a suggested empty seat', () => {
+    const captured = { ...snapshot, objects: [] }
+    for (const response of ['unoccupied chair | left\noccupied chair | left', 'chair | left', 'unoccupied chair | left\nchair | left']) {
+      expect(answerSeats(mergeVisionEvidence(response, captured))).toContain('I can’t tell if it’s free')
+    }
   })
 
   test('normalizes one singular visual object and defaults missing seats to no seat claim', () => {

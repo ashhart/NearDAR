@@ -4,6 +4,9 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.speech.ModelDownloadListener
 import android.speech.RecognitionListener
 import android.speech.RecognitionSupport
 import android.speech.RecognitionSupportCallback
@@ -21,6 +24,7 @@ class RecognitionController(
 ) {
   private enum class Stage {
     REQUESTING_PERMISSION,
+    WAITING_FOR_FOREGROUND,
     CHECKING_SUPPORT,
     STARTING,
     CAPTURING
@@ -37,7 +41,15 @@ class RecognitionController(
     var recognizer: SpeechRecognizer? = null
   }
 
+  private data class ModelDownload(
+    val recognizer: SpeechRecognizer,
+    val promise: Promise,
+    val timeout: Runnable
+  )
+
+  private val handler = Handler(Looper.getMainLooper())
   private var activeSession: Session? = null
+  private var modelDownload: ModelDownload? = null
   private var foreground = true
   private var destroyed = false
 
@@ -105,11 +117,8 @@ class RecognitionController(
       cancel(session, "Voice module was destroyed.")
       return
     }
-    if (!foreground) {
-      cancel(session, "Activity entered the background.")
-      return
-    }
-    startAfterPermission(session)
+    if (foreground) startAfterPermission(session)
+    else session.stage = Stage.WAITING_FOR_FOREGROUND
   }
 
   private fun startAfterPermission(session: Session) {
@@ -195,16 +204,55 @@ class RecognitionController(
     }
   }
 
-  private fun recognitionIntent(session: Session): Intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-    putExtra(RecognizerIntent.EXTRA_LANGUAGE, normalizedTag(session.locale))
+  private fun recognitionIntent(session: Session): Intent = recognitionIntent(session.locale, session.silenceTimeoutMs)
+
+  private fun recognitionIntent(locale: Locale, silenceTimeoutMs: Int? = null): Intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+    putExtra(RecognizerIntent.EXTRA_LANGUAGE, normalizedTag(locale))
     putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
     putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
     putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 5)
     putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
-    session.silenceTimeoutMs?.let {
+    silenceTimeoutMs?.let {
       putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, it)
       putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, it)
     }
+  }
+
+  fun downloadOfflineModel(promise: Promise) {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE || !isOnDeviceRecognitionAvailable()) {
+      throw VoiceException("ERR_RECOGNITION_DOWNLOAD_UNAVAILABLE", "Download offline speech in your phone’s speech settings.")
+    }
+    if (modelDownload != null || activeSession != null) {
+      throw VoiceException("ERR_RECOGNITION_BUSY", "Finish the current voice action first.")
+    }
+    val intent = recognitionIntent(requireLocale(null))
+    val recognizer = SpeechRecognizer.createOnDeviceSpeechRecognizer(context)
+    val timeout = Runnable {
+      finishModelDownload(recognizer, "requested")
+    }
+    modelDownload = ModelDownload(recognizer, promise, timeout)
+    handler.postDelayed(timeout, 120_000)
+    try {
+      recognizer.triggerModelDownload(intent, context.mainExecutor, object : ModelDownloadListener {
+        override fun onProgress(completedPercent: Int) = Unit
+        override fun onSuccess() = finishModelDownload(recognizer, "ready")
+        override fun onScheduled() = finishModelDownload(recognizer, "requested")
+        override fun onError(error: Int) {
+          finishModelDownload(recognizer, error = recognitionError(error, "Offline speech download failed"))
+        }
+      })
+    } catch (error: Exception) {
+      finishModelDownload(recognizer, error = asVoiceException("ERR_RECOGNITION_DOWNLOAD_FAILED", "Offline speech download failed", error))
+    }
+  }
+
+  private fun finishModelDownload(recognizer: SpeechRecognizer, result: String? = null, error: VoiceException? = null) {
+    val download = modelDownload?.takeIf { it.recognizer === recognizer } ?: return
+    modelDownload = null
+    handler.removeCallbacks(download.timeout)
+    runCatching { recognizer.destroy() }
+    if (error == null) download.promise.resolve(result)
+    else download.promise.reject(error)
   }
 
   private inner class SessionListener(private val session: Session) : RecognitionListener {
@@ -263,11 +311,16 @@ class RecognitionController(
 
   fun background() {
     foreground = false
-    activeSession?.let { cancel(it, "Activity entered the background.") }
+    val session = activeSession ?: return
+    // Android pauses the activity while the microphone permission dialog is open.
+    if (session.stage == Stage.REQUESTING_PERMISSION || session.stage == Stage.WAITING_FOR_FOREGROUND) return
+    cancel(session, "Activity entered the background.")
   }
 
   fun foreground() {
     foreground = true
+    val session = activeSession ?: return
+    if (session.stage == Stage.WAITING_FOR_FOREGROUND) startAfterPermission(session)
   }
 
   private fun fail(session: Session, error: VoiceException) {
@@ -350,5 +403,8 @@ class RecognitionController(
     if (destroyed) return
     activeSession?.let { cancel(it, "Voice module was destroyed.") }
     destroyed = true
+    modelDownload?.let {
+      finishModelDownload(it.recognizer, error = VoiceException("ERR_MODULE_DESTROYED", "The voice module has been destroyed."))
+    }
   }
 }

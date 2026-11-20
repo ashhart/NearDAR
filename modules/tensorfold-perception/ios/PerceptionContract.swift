@@ -80,9 +80,9 @@ enum PerceptionContract {
       notes.append("Named chair and person detection is unavailable in this ARCore adapter. Generic depth obstacles and captured image evidence remain available.")
     }
     let nativeOCR = native["ocr"] as? [[String: Any]] ?? []
-    let recognizedText = nativeOCR.compactMap { observation -> String? in
+    let textObservations = nativeOCR.compactMap { observation -> [String: String]? in
       guard let text = observation["text"] as? String, !text.isEmpty else { return nil }
-      return text
+      return ["text": text, "direction": direction(observation["direction"] as? [String: Any])]
     }
     let validDepthFraction = obstacles.reduce(0.0) { $0 + ($1["validPixelFraction"] as? Double ?? 0) } / 15
     let trackingReady = native["trackingState"] as? String == "normal" && nativeDepth != "stale"
@@ -90,7 +90,8 @@ enum PerceptionContract {
       "observedAt": native["cameraTimestampMs"] as? Double ?? native["capturedAtMs"] as? Double ?? Date().timeIntervalSince1970 * 1000,
       "sequence": nextSequence(), "trackingReady": trackingReady, "depthState": depthState,
       "validDepthFraction": validDepthFraction, "cameraOrientation": "camera-forward",
-      "objects": objects, "freeSeats": freeSeats, "recognizedText": recognizedText, "notes": notes
+      "objects": objects, "freeSeats": freeSeats, "recognizedText": textObservations.compactMap { $0["text"] },
+      "textObservations": textObservations, "notes": notes
     ]
     if let image = native["image"] as? [String: Any], let uri = image["uri"] as? String {
       result["temporaryImagePath"] = uri
@@ -155,7 +156,7 @@ enum PerceptionContract {
     switch native["bearing"] as? String {
     case "left", "upper-left", "lower-left": return "left"
     case "right", "upper-right", "lower-right": return "right"
-    case "ahead", "above", "below": return "ahead"
+    case "ahead", "above", "below", "upper", "lower": return "ahead"
     default: return "unknown"
     }
   }

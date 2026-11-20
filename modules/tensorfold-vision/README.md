@@ -74,4 +74,4 @@ The real `What's ahead?` flow captured a frozen emulator frame, ran offline perc
 
 Focused guidance tests cover market object queries, seat-evidence rejection and corroboration, street-object direction and step estimates, stale snapshots, generated-answer evidence binding, and malformed visual output. These tests do not establish recognition quality in physical stores, restaurants, or streets.
 
-These emulator checks do not establish production latency, cancellation, memory pressure, physical GPU compatibility, or scene-recognition quality. Test those paths on physical devices. iOS physical-device inference and camera, depth, Bluetooth, haptics, offline speech, model-memory, and thermal checks also still require physical hardware.
+Physical-device validation is pending for camera and depth quality, Bluetooth, haptics, offline speech, model cancellation, sustained latency, memory pressure, and thermal behavior.

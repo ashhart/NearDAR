@@ -39,14 +39,22 @@ object SceneImage {
     }
   }
 
-  fun sensorBounds(rect: Rect, imageWidth: Int, imageHeight: Int, rotation: Int): Map<String, Double> {
+  fun uprightBounds(rect: Rect, imageWidth: Int, imageHeight: Int, rotation: Int): Map<String, Double> {
     val rotated = rotation == 90 || rotation == 270
     val outputWidth = if (rotated) imageHeight else imageWidth
     val outputHeight = if (rotated) imageWidth else imageHeight
-    val x = rect.left.toDouble() / outputWidth
-    val y = rect.top.toDouble() / outputHeight
-    val width = rect.width().toDouble() / outputWidth
-    val height = rect.height().toDouble() / outputHeight
+    return linkedMapOf(
+      "x" to rect.left.toDouble() / outputWidth, "y" to rect.top.toDouble() / outputHeight,
+      "width" to rect.width().toDouble() / outputWidth, "height" to rect.height().toDouble() / outputHeight
+    )
+  }
+
+  fun sensorBounds(rect: Rect, imageWidth: Int, imageHeight: Int, rotation: Int): Map<String, Double> {
+    val bounds = uprightBounds(rect, imageWidth, imageHeight, rotation)
+    val x = bounds.getValue("x")
+    val y = bounds.getValue("y")
+    val width = bounds.getValue("width")
+    val height = bounds.getValue("height")
     return when (rotation) {
       90 -> linkedMapOf("x" to y, "y" to 1 - x - width, "width" to height, "height" to width)
       270 -> linkedMapOf("x" to 1 - y - height, "y" to x, "width" to height, "height" to width)

@@ -185,13 +185,20 @@ extension VoiceController {
   private func scheduleSilenceTimer(generation: Int) {
     silenceTimer?.invalidate()
     guard let milliseconds = silenceTimeoutMs else { return }
-    silenceTimer = Timer.scheduledTimer(withTimeInterval: milliseconds / 1000, repeats: false) { [weak self] _ in
+    let delay = hasEmittedSpeechStarted ? milliseconds : max(12_000, milliseconds)
+    silenceTimer = Timer.scheduledTimer(withTimeInterval: delay / 1000, repeats: false) { [weak self] _ in
       guard let self, generation == self.recognitionGeneration, self.recognitionTask != nil else { return }
-      self.recognitionRequest?.endAudio()
-      self.audioEngine?.inputNode.removeTap(onBus: 0)
+      guard self.hasEmittedSpeechStarted else {
+        self.stopListening(reason: "noSpeech")
+        return
+      }
       self.audioEngine?.stop()
+      self.recognitionRequest?.endAudio()
       self.emitListening("speechEnded", reason: "silenceTimeout")
-      self.silenceTimer = nil
+      self.silenceTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: false) { [weak self] _ in
+        guard let self, generation == self.recognitionGeneration else { return }
+        self.stopListening(reason: "noFinalSpeechResult")
+      }
     }
   }
 

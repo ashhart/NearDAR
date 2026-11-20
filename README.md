@@ -1,72 +1,73 @@
-# Sonar
+# NearDAR
 
-A standalone React Native application for eyes-free, on-device spatial assistance. TensorFold is the embedded language-inference engine, not a desktop server or a cloud fallback.
+**A camera companion for everyday errands, built for blind and low-vision people.**
 
-## Runtime architecture
+![A person with a long white cane, phone, glasses, and earbud near outdoor café seating](docs/images/neardar-hero.jpg)
 
-1. Native ARKit or ARCore captures timestamped camera, tracking, depth, and confidence data.
-2. Native geometry and detectors produce proximity warnings, coarse direction and distance, step estimates, seat evidence, and OCR. This path does not wait for a language model.
-3. An explicit scene question can freeze one current frame for SmolVLM2-500M through LiteRT-LM. Its strict `object | direction` labels are supplemental appearance evidence, never depth or movement-safety decisions.
-4. The guidance layer associates a visual label with measured geometry only for an unambiguous coarse-direction match. Otherwise it speaks the label without distance.
-5. TensorFold answers open questions when the platform has its native conversation backend. Every platform can use deterministic native scene facts. Generated prose is rejected when evidence IDs, known labels, directions, or numeric measurements do not match.
-6. Offline speech synthesis speaks the answer. Recognition restarts afterward while hands-free mode and guidance remain active.
+Ask what’s nearby, look for a seat, verify a product label, or find a checkout sign. NearDAR uses the phone camera, offline text recognition, and a downloadable on-device vision model. Ask by voice or type, then hear what the app can make out from the current view.
 
-Pausing, backgrounding, disabling hands-free mode, or losing a headphone route stops the relevant camera and microphone work. Speech and inference have request-specific cancellation. Sensor degradation and recovery have separate spoken status cues.
+[See NearDAR in action](#see-neardar-in-action) · [Build NearDAR](#build-neardar)
 
-## Platform capabilities
+## See NearDAR in action
 
-| Capability | iOS 17+ | Android 10+ |
-| --- | --- | --- |
-| Camera and tracking | ARKit on supported devices | ARCore on supported devices |
-| Measured depth | LiDAR scene depth when present | ARCore raw depth and confidence when supported |
-| Object evidence | Mesh classes, person detection, and supplemental SmolVLM2 labels | Generic depth geometry and supplemental SmolVLM2 labels |
-| Free-seat evidence | Native visual/geometry evidence plus supplemental image evidence | Requires compatible visual and geometric evidence; ambiguous scenes return no seat |
-| OCR | Apple Vision | Bundled offline ML Kit |
-| Conversation | Embedded TensorFold with Metal | Unavailable: upstream Vulkan lacks a served mobile checkpoint-loading generation engine |
-| Visual model | LiteRT-LM 0.19.1 with SmolVLM2-500M | LiteRT-LM 0.19.1 with SmolVLM2-500M |
-| Voice | On-device speech recognition and an installed offline synthesis voice | On-device recognizer and installed offline voice data |
-| Directional haptics | Core Haptics | Android vibration patterns |
+<table>
+  <thead>
+    <tr>
+      <th>Find a seat</th>
+      <th>Check a label</th>
+      <th>Find checkout</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><img src="docs/images/find-a-seat.png" width="228" alt="NearDAR detects a chair and asks for a better camera view before judging whether it is free."></td>
+      <td><img src="docs/images/check-a-label.png" width="228" alt="NearDAR reads low-salt baked beans and 400 grams on a product label."></td>
+      <td><img src="docs/images/find-checkout.png" width="228" alt="NearDAR reads a checkout sign ahead and reports uncertainty about the queue."></td>
+    </tr>
+  </tbody>
+</table>
 
-Unsupported hardware or missing offline assets returns an explicit unavailable state. The app does not replace those failures with cloud inference or simulated measurements. ARCore depth is optional on supported ARCore devices; distances and steps are omitted when depth confidence or freshness is insufficient.
+These are Android emulator captures using camera fixtures with networking disabled. The opening image is an illustration of the intended use. [See the first-run setup screen](docs/images/first-run.png).
 
-## Models
+## What you can ask
 
-- **TensorFold:** Qwen3.5-2B language inference for open scene questions. Installation uses pinned artifacts, checksums, atomic installation, explicit loading, and cancellation.
-- **Vision:** `litert-community/SmolVLM2-500M`, revision `8dbba113efdeca80107357d76ab00fc0c71048fd`, Apache-2.0, approximately 363 MB. Model output is limited to validated line-based object/seat labels and one conversation per frozen image.
+- **“Help me find a seat.”** Take a fresh look with “Is that one free?” NearDAR distinguishes a visible chair from a seat with enough evidence to suggest availability.
+- **“Is this the 400-gram tin?”** Find an item and hold its label close to confirm the name and details the camera can read.
+- **“I need baked beans, oats, and milk.”** Start a session shopping list. Say “Next item” to look for it and “Cross that off” when you’ve got it.
+- **“Find the checkout.”** Hear what the sign says and where it appears in the camera view.
+- **“Where am I?”** Get an approximate location when your phone can provide one. Looking up an address can use the network.
 
-FastVLM is not used: its model license excludes product development. Model downloads use the network. Installed inference, perception, recognition, and synthesis run locally; the operating system must have the required offline speech assets.
+## Development status
 
-## Wearables
+NearDAR is a development preview. Offline camera capture, visual inference, label reading, and spoken answers have been exercised on Android with emulator fixtures. The iOS release build compiles unsigned. Physical-device speech, depth, and real-venue performance still need validation. Depth, distance estimates, and speech availability depend on the device and its installed language assets.
 
-The phone provides one vibration location, so direction uses learned temporal patterns with redundant speech, not spatial vibration. See [wearable integration boundaries](docs/wearables.md) for Meta glasses, watches, and multi-actuator devices. Glasses camera APIs do not supply LiDAR or metric depth, and Meta's current iOS store restriction prevents presenting that adapter as a store-ready feature.
+The visual model is a one-time download of about 363 MB. Camera images used for questions are processed on the phone and released after use. NearDAR is designed to accompany a cane, guide dog, or other mobility aid.
 
-## Repository layout
+## Build NearDAR
 
-- `src/app/`: Expo Router screens and spoken onboarding.
-- `src/lib/guidance/`: request lifecycle, grounding, command, alert, and recovery policy.
-- `modules/tensorfold-engine/`: embedded TensorFold native module.
-- `modules/tensorfold-vision/`: pinned LiteRT-LM visual inference.
-- `modules/tensorfold-perception/`: native camera, depth, detection, frozen captures, and scene snapshots.
-- `modules/tensorfold-voice/`: offline speech and audio routing.
-- `modules/tensorfold-haptics/`: native directional patterns.
-- `engine/`: app-owned TensorFold build adaptation.
-- `vendor/TensorFold/`: pinned upstream source, fetched by the bootstrap script.
-
-## Development
-
-Install Bun, Xcode with an iOS device target, Android SDK tools, and the exact Zig version from `vendor/TensorFold/.zig-version` after bootstrapping.
+Use Git, Node.js, Bun, and the Zig version pinned in `vendor/TensorFold/.zig-version`. Install the Android SDK and a compatible JDK for Android development, or Xcode and CocoaPods for iOS development on macOS.
 
 ```sh
-bun install
+bun install --frozen-lockfile
 ./scripts/bootstrap-engine.sh
-node scripts/engine/build-mobile.mjs
+cat vendor/TensorFold/.zig-version
 bun run verify
-bun run ios
+```
+
+Set `ANDROID_HOME` and connect an Android device or start an emulator.
+
+```sh
+node scripts/engine/build-mobile.mjs --android
 bun run android
 ```
 
-The engine build creates both device and arm64 Simulator libraries, packages them as `engine/out/ios/TensorFoldMobile.xcframework`, copies that XCFramework into the engine pod's ignored vendor directory, and builds Android arm64 and x86_64 libraries.
+Connect an iPhone and configure signing in Xcode.
 
-The iOS run script downloads and verifies the pinned LiteRT-LM 0.19.1 XCFramework before building. For direct `expo prebuild`, CocoaPods, or `xcodebuild` commands, run `bun run vendor:litert-ios` first. The generated binary stays out of Git; the pinned production Swift wrappers and their license are in `modules/tensorfold-vision/ios/LiteRTLM/`.
+```sh
+node scripts/engine/build-mobile.mjs --ios
+bun run ios
+```
 
-Use physical devices for camera, depth, Bluetooth, haptics, offline speech assets, model-memory, and thermal testing. Simulators and the web surface can verify interface and some native-runtime behavior but cannot qualify spatial guidance or device performance. Guidance supplements usual mobility aids; it never decides when a path is safe or when to cross a road.
+The iOS command fetches the pinned LiteRT-LM XCFramework and verifies its checksum. Run `bun run vendor:litert-ios` before invoking an iOS prebuild or Xcode separately. Run `bun run web` for a browser preview of the interface.
+
+[Visual model and build details](modules/tensorfold-vision/README.md) · [Wearable development notes](docs/wearables.md) · [Third-party notices](modules/tensorfold-vision/THIRD_PARTY_NOTICES.txt)
