@@ -2,7 +2,7 @@
 
 **A camera companion for everyday errands, built for blind and low-vision people.**
 
-![A person with a long white cane, phone, glasses, and earbud near outdoor café seating](docs/images/neardar-hero.jpg)
+![A woman with a white cane and an earbud holds up her phone outside a café. Beside her, a NearDAR concept screen shows a depth scan of a chair, a speech waveform, and an alignment tap.](docs/images/neardar-hero.jpg)
 
 Ask what’s nearby, look for a seat, verify a product label, or find a checkout sign. NearDAR uses the phone camera, offline text recognition, and a downloadable on-device vision model. Ask by voice or type, then hear what the app can make out from the current view.
 
