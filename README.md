@@ -45,7 +45,7 @@ The visual model is a one-time download of about 363 MB. Camera images used for 
 
 ## Build NearDAR
 
-Use Git, Node.js, Bun, and the Zig version pinned in `vendor/TensorFold/.zig-version`. Install the Android SDK and a compatible JDK for Android development, or Xcode and CocoaPods for iOS development on macOS.
+Use Git, Node.js, Bun, and the Zig version pinned in `vendor/TensorFold/.zig-version`. Install the Android SDK (with `platform-tools` / `adb` on `PATH`) and JDK 17 for Android development on Linux or macOS, or Xcode and CocoaPods for iOS development on macOS.
 
 ```sh
 bun install --frozen-lockfile
@@ -54,12 +54,13 @@ cat vendor/TensorFold/.zig-version
 bun run verify
 ```
 
-Set `ANDROID_HOME` and connect an Android device or start an emulator.
+Set `ANDROID_HOME` (or `ANDROID_SDK_ROOT`) and connect an Android device over USB or wireless ADB, or start an emulator.
 
 ```sh
-node scripts/engine/build-mobile.mjs --android
 bun run android
 ```
+
+`bun run android` builds the Android mobile engine (`arm64-v8a` and `x86_64`) via `scripts/engine/build-mobile.mjs --android` before invoking Expo. On Linux, running `node scripts/engine/build-mobile.mjs` without flags also builds the Android targets only. To build a standalone release APK after running `bun run engine:android` and `bunx expo prebuild --platform android`, run `./android/gradlew -p android :app:assembleRelease` from the repository root.
 
 Connect an iPhone and configure signing in Xcode.
 

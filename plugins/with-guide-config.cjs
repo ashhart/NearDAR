@@ -3,6 +3,10 @@ const { withAndroidManifest, withProjectBuildGradle, withPodfile } = require('@e
 module.exports = function withGuideConfig(config) {
   config = withProjectBuildGradle(config, (mod) => {
     if (mod.modResults.language !== 'groovy') return mod
+    mod.modResults.contents = mod.modResults.contents.replace(
+      "classpath('org.jetbrains.kotlin:kotlin-gradle-plugin')",
+      "classpath('org.jetbrains.kotlin:kotlin-gradle-plugin:2.3.0')",
+    )
     if (!mod.modResults.contents.includes('Sonar Kotlin compiler contract')) {
       mod.modResults.contents += `
 // Sonar Kotlin compiler contract: LiteRT-LM 0.19.1 publishes Kotlin 2.4 metadata.
