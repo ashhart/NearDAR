@@ -68,6 +68,7 @@ export function GuidanceProvider({ children }: { children: ReactNode }) {
   const listeningRef = useRef(false)
   const handsFreeRef = useRef(false)
   const speakingRef = useRef(false)
+  const pendingAnnouncement = useRef<{ text: string; id: string } | undefined>(undefined)
   const speechId = useRef<string | undefined>(undefined)
   const speechCounter = useRef(0)
   const processingRequest = useRef<string | undefined>(undefined)
@@ -143,14 +144,14 @@ export function GuidanceProvider({ children }: { children: ReactNode }) {
     if (epoch !== cameraEpoch.current || speechId.current !== utteranceId) return
     listeningRef.current = false
     setListening(false)
-    if (Platform.OS === 'ios' && !urgent && !handsFreeRef.current) {
+    if (Platform.OS === 'ios') {
       const voiceOver = await AccessibilityInfo.isScreenReaderEnabled().catch(() => false)
       if (epoch !== cameraEpoch.current || speechId.current !== utteranceId) return
-      if (voiceOver && !handsFreeRef.current) {
-        speechId.current = undefined
-        speakingRef.current = false
-        setSpeaking(false)
-        AccessibilityInfo.announceForAccessibilityWithOptions(text, { queue: true })
+      if (voiceOver) {
+        await Voice.stopSpeaking().catch(() => {})
+        if (epoch !== cameraEpoch.current || speechId.current !== utteranceId) return
+        pendingAnnouncement.current = { text, id: utteranceId }
+        AccessibilityInfo.announceForAccessibilityWithOptions(text, { queue: !urgent })
         return
       }
     }
@@ -598,6 +599,21 @@ export function GuidanceProvider({ children }: { children: ReactNode }) {
       if (event.type === 'lifecycle' && event.foreground === false && !voicePermissionPending.current && !locationPermissionPending.current && (locationRequest.current || stateRef.current === 'active' || stateRef.current === 'degraded')) void pause(true)
       if (event.message) setStatusMessage(event.message)
     })
+    function finishAnnouncement(text?: string) {
+      const pending = pendingAnnouncement.current
+      if (!pending || pending.id !== speechId.current || (text !== undefined && pending.text !== text)) return
+      pendingAnnouncement.current = undefined
+      speechId.current = undefined
+      speakingRef.current = false
+      setSpeaking(false)
+      void resumeListeningRef.current()
+    }
+    const announcements = Platform.OS === 'ios' ? AccessibilityInfo.addEventListener(
+      'announcementFinished', ({ announcement }) => finishAnnouncement(announcement)
+    ) : undefined
+    const screenReaderChanges = Platform.OS === 'ios' ? AccessibilityInfo.addEventListener(
+      'screenReaderChanged', enabled => { if (!enabled) finishAnnouncement() }
+    ) : undefined
     const voiceEvents = Voice.addVoiceListener((event: Voice.VoiceEvent) => {
       if (event.type === 'final' && event.text && !textEntry.current && !pausing.current && !processingRequest.current && (stateRef.current === 'active' || stateRef.current === 'degraded')) transcriptAction.current(event.text)
       if (event.type === 'listeningStopped') {
@@ -635,6 +651,8 @@ export function GuidanceProvider({ children }: { children: ReactNode }) {
       locationRequest.current?.abort()
       perceptionEvents.remove()
       voiceEvents.remove()
+      announcements?.remove()
+      screenReaderChanges?.remove()
       void Promise.allSettled([Perception.stopSession(), Voice.stopListening(), Voice.stopSpeaking(), Haptics.stop()])
     }
     // Subscribe once; handlers read changing settings and session state through refs.
