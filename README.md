@@ -31,17 +31,17 @@ These are Android emulator captures using camera fixtures with networking disabl
 
 ## What you can ask
 
-- **“Help me find a seat.”** Take a fresh look with “Is that one free?” NearDAR distinguishes a visible chair from a seat with enough evidence to suggest availability.
+- **“Help me find a seat.”** Take a fresh look with “Is that one free?” NearDAR distinguishes a visible chair from a seat with enough evidence to suggest availability. On a LiDAR iPhone, “Align to the seat” offers a tap when you turn the phone toward a freshly measured seat while standing still.
 - **“Is this the 400-gram tin?”** Find an item and hold its label close to confirm the name and details the camera can read.
 - **“I need baked beans, oats, and milk.”** Start a session shopping list. Say “Next item” to look for it and “Cross that off” when you’ve got it.
 - **“Find the checkout.”** Hear what the sign says and where it appears in the camera view.
-- **“Where am I?”** Get an approximate location when your phone can provide one. Looking up an address can use the network.
+- **“Where am I?”** Get an approximate location from a fresh fix. Looking up an address can use the network. NearDAR can read the coordinates when no address is available.
 
 ## Development status
 
 NearDAR is a development preview. Offline camera capture, visual inference, label reading, and spoken answers have been exercised on Android with emulator fixtures. The iOS release build compiles unsigned. Physical-device speech, depth, and real-venue performance still need validation. Depth, distance estimates, and speech availability depend on the device and its installed language assets.
 
-The visual model is a one-time download of about 363 MB. Camera images used for questions are processed on the phone and released after use. NearDAR is designed to accompany a cane, guide dog, or other mobility aid.
+The visual model is a one-time download of about 363 MB. On supported iPhones, you can also download TensorFold Mobile’s 2B conversation model (about 1.75 GB) in Settings. It loads automatically for open questions when the camera has enough evidence. Camera images used for questions are processed on the phone and released after use. NearDAR is designed to accompany a cane, guide dog, or other mobility aid.
 
 ## Build NearDAR
 
@@ -71,4 +71,4 @@ bun run ios
 
 The iOS command fetches the pinned LiteRT-LM XCFramework and verifies its checksum. Run `bun run vendor:litert-ios` before invoking an iOS prebuild or Xcode separately. Run `bun run web` for a browser preview of the interface.
 
-[Visual model and build details](modules/tensorfold-vision/README.md) · [Wearable development notes](docs/wearables.md) · [Third-party notices](modules/tensorfold-vision/THIRD_PARTY_NOTICES.txt)
+[Visual model and build details](modules/tensorfold-vision/README.md) · [LiDAR validation](docs/lidar-validation.md) · [Wearable development notes](docs/wearables.md) · [Third-party notices](modules/tensorfold-vision/THIRD_PARTY_NOTICES.txt)

@@ -68,7 +68,8 @@ object SceneImage {
     image: Image,
     rotation: Int,
     quality: Int,
-    cameraTimestampMs: Double
+    cameraTimestampMs: Double,
+    maxImageLongEdge: Int?
   ): Map<String, Any> {
     require(image.format == android.graphics.ImageFormat.YUV_420_888) { "The camera did not provide a YUV_420_888 image." }
     val bytes = toNv21(image)
@@ -81,7 +82,11 @@ object SceneImage {
     if (!directory.exists() && !directory.mkdirs()) {
       throw PerceptionException("E_CAPTURE", "The temporary perception directory could not be created.")
     }
-    val oriented = orientJPEG(output.toByteArray(), rotation, quality.coerceIn(10, 100))
+    val encoded = output.toByteArray()
+    val longest = max(image.width, image.height)
+    val target = min(longest, maxImageLongEdge?.takeIf { it in 128..4096 } ?: longest)
+    val oriented = if (rotation == 0 && target == longest) Triple(encoded, image.width, image.height)
+      else encodeUpright(encoded, rotation, quality.coerceIn(10, 100), longest, target)
     val file = File(directory, "${UUID.randomUUID()}.jpg")
     FileOutputStream(file).use { it.write(oriented.first) }
     pruneCaptures(activity, file)
@@ -106,18 +111,16 @@ object SceneImage {
     }
   }
 
-  private fun orientJPEG(encoded: ByteArray, rotation: Int, quality: Int): Triple<ByteArray, Int, Int> {
-    if (rotation == 0) {
-      val source = BitmapFactory.decodeByteArray(encoded, 0, encoded.size)
-        ?: throw PerceptionException("E_CAPTURE", "The encoded camera image could not be decoded.")
-      val result = Triple(encoded, source.width, source.height)
-      source.recycle()
-      return result
-    }
-    val source = BitmapFactory.decodeByteArray(encoded, 0, encoded.size)
+  private fun encodeUpright(encoded: ByteArray, rotation: Int, quality: Int, longest: Int, target: Int): Triple<ByteArray, Int, Int> {
+    val options = BitmapFactory.Options().apply { inSampleSize = Integer.highestOneBit(longest / target) }
+    val source = BitmapFactory.decodeByteArray(encoded, 0, encoded.size, options)
       ?: throw PerceptionException("E_CAPTURE", "The encoded camera image could not be decoded.")
     try {
-      val matrix = Matrix().apply { postRotate(rotation.toFloat()) }
+      val scale = min(1f, target.toFloat() / max(source.width, source.height))
+      val matrix = Matrix().apply {
+        postRotate(rotation.toFloat())
+        postScale(scale, scale)
+      }
       val rotated = android.graphics.Bitmap.createBitmap(source, 0, 0, source.width, source.height, matrix, true)
       try {
         val result = java.io.ByteArrayOutputStream(encoded.size)

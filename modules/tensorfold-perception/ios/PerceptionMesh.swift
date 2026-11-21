@@ -1,5 +1,6 @@
 import ARKit
 import Foundation
+import ImageIO
 import simd
 
 struct MeshGeometry {
@@ -19,18 +20,24 @@ final class MeshStore {
   func update(_ anchor: ARMeshAnchor) {
     var byLabel: [String: (count: Int, total: Int, sum: SIMD3<Float>, min: SIMD3<Float>, max: SIMD3<Float>)] = [:]
     let geometry = anchor.geometry
-    guard let classifications = geometry.classification else {
+    let triangles = geometry.faces
+    let vertices = geometry.vertices
+    guard let classifications = geometry.classification, triangles.indexCountPerPrimitive == 3,
+      triangles.bytesPerIndex == 2 || triangles.bytesPerIndex == 4,
+      vertices.format == .float3, vertices.stride >= MemoryLayout<Float>.size * 3,
+      classifications.stride > 0, classifications.count >= triangles.count,
+      triangles.count <= triangles.buffer.length / (3 * triangles.bytesPerIndex) else {
       self.classifications[anchor.identifier] = []
       return
     }
-    let triangles = geometry.faces
     let totalFaces = triangles.count
     let vertexBytes = geometry.vertices.buffer.contents()
     let indexBytes = triangles.buffer.contents()
     let classBytes = classifications.buffer.contents().assumingMemoryBound(to: UInt8.self)
-    let vertices = geometry.vertices
     for face in 0..<totalFaces {
-      let raw = classBytes[face * classifications.stride]
+      let classOffset = classifications.offset + face * classifications.stride
+      guard classOffset >= 0, classOffset < classifications.buffer.length else { continue }
+      let raw = classBytes[classOffset]
       guard let classification = ARMeshClassification(rawValue: Int(raw)), let label = MeshStore.label(classification) else { continue }
       var faceVertices: [SIMD3<Float>] = []
       for corner in 0..<3 {
@@ -45,9 +52,12 @@ final class MeshStore {
           memcpy(&value, indexBytes.advanced(by: indexPosition), 4)
           index = Int(value)
         }
-        guard index < vertices.count else { faceVertices = []; break }
+        let offset = vertices.offset + index * vertices.stride
+        let byteCount = MemoryLayout<Float>.size * 3
+        guard index < vertices.count, offset >= 0, offset <= vertices.buffer.length - byteCount else { faceVertices = []; break }
         var value = SIMD3<Float>()
-        memcpy(&value, vertexBytes.advanced(by: vertices.offset + index * vertices.stride), MemoryLayout<SIMD3<Float>>.size)
+        memcpy(&value, vertexBytes.advanced(by: offset), byteCount)
+        guard value.x.isFinite, value.y.isFinite, value.z.isFinite else { faceVertices = []; break }
         faceVertices.append(value)
       }
       guard faceVertices.count == 3 else { continue }
@@ -76,10 +86,16 @@ final class MeshStore {
 
   func clear() { classifications.removeAll() }
 
-  func objects(frame: ARFrame, settings: PerceptionSettings) -> [[String: Any]] {
+  func position(ofSeatIn anchorID: UUID, frame: ARFrame) -> SIMD3<Float>? {
+    guard let seat = classifications[anchorID]?.first(where: { $0.label == "seat" && $0.faceCount >= 3 }),
+      let anchor = frame.anchors.first(where: { $0.identifier == anchorID }) as? ARMeshAnchor else { return nil }
+    let world = anchor.transform * SIMD4(seat.center, 1)
+    return SIMD3(world.x, world.y, world.z)
+  }
+
+  func objects(frame: ARFrame, timestamp: Double, orientation: CGImagePropertyOrientation, settings: PerceptionSettings) -> [[String: Any]] {
     let meshes = frame.anchors.compactMap { $0 as? ARMeshAnchor }
     let view = frame.camera.transform.inverse
-    let timestamp = Geometry.timestamp(frame.timestamp)
     var output: [[String: Any]] = []
     for anchor in meshes {
       guard let geometries = classifications[anchor.identifier] else { continue }
@@ -99,9 +115,8 @@ final class MeshStore {
               minimum = simd.min(minimum, corner)
               maximum = simd.max(maximum, corner)
               if corner.z > 0.1 {
-                let u = (Double(frame.camera.intrinsics[0, 0]) * corner.x / corner.z + Double(frame.camera.intrinsics[2, 0])) / Double(frame.camera.imageResolution.width)
-                let v = (Double(frame.camera.intrinsics[1, 1]) * corner.y / corner.z + Double(frame.camera.intrinsics[2, 1])) / Double(frame.camera.imageResolution.height)
-                projected.append((u, v))
+                let pixel = Geometry.project(corner, camera: frame.camera)
+                projected.append((pixel.x, pixel.y))
               }
             }
           }
@@ -110,9 +125,10 @@ final class MeshStore {
         let distance = simd.length(center)
         var object: [String: Any] = [
           "id": "mesh-\(anchor.identifier.uuidString)-\(geometry.label)",
+          "anchorId": anchor.identifier,
           "label": geometry.label, "confidence": geometry.support, "source": "arkit-mesh-classification",
           "trackingState": tracking(frame.camera.trackingState), "cameraTimestampMs": timestamp, "depthTimestampMs": timestamp,
-          "direction": Geometry.direction(x: center.x, y: center.y, z: center.z),
+          "direction": Geometry.direction(sensorX: center.x, sensorY: -center.y, z: center.z, orientation: orientation),
           "distanceMeters": distance, "robustDistanceMeters": distance,
           "nearestPoint": ["x": center.x, "y": center.y, "z": center.z],
           "center": ["x": center.x, "y": center.y, "z": center.z],
@@ -120,7 +136,10 @@ final class MeshStore {
         ]
         if let xs = projected.map({ $0.0 }).min(), let maxX = projected.map({ $0.0 }).max(),
           let ys = projected.map({ $0.1 }).min(), let maxY = projected.map({ $0.1 }).max() {
-          object["bounds"] = ["x": max(0, xs), "y": max(0, ys), "width": min(1, maxX) - max(0, xs), "height": min(1, maxY) - max(0, ys)]
+          let left = max(0, xs), top = max(0, ys)
+          let width = min(1, maxX) - left, height = min(1, maxY) - top
+          guard width > 0, height > 0 else { continue }
+          object["bounds"] = ["x": left, "y": top, "width": width, "height": height]
         }
         if let steps = Geometry.steps(distance, settings: settings) { object["steps"] = steps }
         output.append(object)

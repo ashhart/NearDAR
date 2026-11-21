@@ -1,5 +1,5 @@
 import { type EventSubscription, requireOptionalNativeModule } from 'expo-modules-core'
-import { createDefaultManifest, defaultModelId } from './manifest'
+import { createDefaultManifest, defaultModelId, throwIfCancelled } from './manifest'
 import type { EngineEvent, EngineStatus, InstallManifest, NativeTensorFoldEngine } from './types'
 
 const unavailableMessage = 'TensorFold native inference is unavailable on this platform. Install the iOS or Android development build.'
@@ -33,7 +33,11 @@ async function installModel(modelId: string = defaultModelId): Promise<EngineSta
   installations.set(modelId, controller)
   try {
     const manifest: InstallManifest = await createDefaultManifest(controller.signal)
+    throwIfCancelled(controller.signal)
     return await Native.installManifest(manifest)
+  } catch (error) {
+    throwIfCancelled(controller.signal)
+    throw error
   } finally {
     installations.delete(modelId)
   }

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import * as Engine from '../../../modules/tensorfold-engine/src'
 import type { EngineCapabilities, EngineStatus } from './types'
 
@@ -11,6 +11,12 @@ function isInstallCancellation(error: unknown): boolean {
 export function useConversationModel(onError: (message: string) => void) {
   const [capabilities, setCapabilities] = useState<EngineCapabilities>()
   const [engineStatus, setEngineStatus] = useState<EngineStatus>({ state: 'not-installed' })
+  const statusRef = useRef(engineStatus)
+
+  function update(status: EngineStatus) {
+    statusRef.current = status
+    setEngineStatus(status)
+  }
 
   useEffect(() => {
     let mounted = true
@@ -18,7 +24,7 @@ export function useConversationModel(onError: (message: string) => void) {
     const subscription = Engine.addEngineListener((event) => {
       if (event.status) {
         observed = true
-        setEngineStatus(event.status)
+        update(event.status)
       }
       if (event.type === 'error' && event.message) onError(event.message)
     })
@@ -26,7 +32,7 @@ export function useConversationModel(onError: (message: string) => void) {
       if (mounted) setCapabilities(value)
     }).catch(() => {})
     void Engine.getStatus().then((value) => {
-      if (mounted && !observed) setEngineStatus(value)
+      if (mounted && !observed) update(value)
     }).catch(() => {})
     return () => {
       mounted = false
@@ -35,43 +41,53 @@ export function useConversationModel(onError: (message: string) => void) {
   }, [onError])
 
   async function installModel() {
-    setEngineStatus({ state: 'downloading', progress: 0, message: 'Preparing the model download.' })
+    if (!['not-installed', 'error'].includes(statusRef.current.state)) return
+    update({ state: 'downloading', progress: 0, message: 'Preparing the model download.' })
     try {
       const result = await Engine.installModel()
-      setEngineStatus(result)
+      update(result)
     } catch (error) {
-      if (isInstallCancellation(error)) setEngineStatus({ state: 'not-installed', message: 'Download cancelled. No model was installed.' })
-      else setEngineStatus({ state: 'error', message: error instanceof Error ? error.message : 'Model installation failed.' })
+      if (isInstallCancellation(error)) update({ state: 'not-installed', message: 'Download cancelled. No model was installed.' })
+      else update({ state: 'error', message: error instanceof Error ? error.message : 'Model installation failed.' })
     }
   }
 
   async function cancelModelInstall() {
     try {
-      if (await Engine.cancelInstall()) setEngineStatus({ state: 'not-installed', message: 'Download cancelled. No model was installed.' })
+      if (await Engine.cancelInstall()) update({ state: 'not-installed', message: 'Download cancelled. No model was installed.' })
     } catch (error) {
-      setEngineStatus({ state: 'error', message: error instanceof Error ? error.message : 'Could not cancel the model download.' })
+      update({ state: 'error', message: error instanceof Error ? error.message : 'Could not cancel the model download.' })
     }
   }
 
-  async function unloadModel() {
-    setEngineStatus({ ...engineStatus, state: 'unloading', message: 'Unloading the conversation model.' })
+  async function unloadModel(): Promise<boolean> {
+    const previous = statusRef.current
+    if (previous.state !== 'ready') return previous.state === 'installed'
+    update({ ...previous, state: 'unloading', message: 'Unloading the conversation model.' })
     try {
       await Engine.unloadModel()
-      setEngineStatus({ ...engineStatus, state: 'installed', message: 'Conversation model unloaded. Sensor guidance remains available.' })
+      update({ ...previous, state: 'installed', message: undefined })
+      return true
     } catch (error) {
-      setEngineStatus({ ...engineStatus, state: 'error', message: error instanceof Error ? error.message : 'Could not unload the conversation model.' })
+      update({ ...previous, message: error instanceof Error ? error.message : 'Could not unload the conversation model.' })
+      return false
     }
   }
 
-  async function loadModel() {
-    setEngineStatus({ state: 'loading', installationId: engineStatus.installationId, message: 'Loading TensorFold into memory.' })
+  async function loadModel(): Promise<boolean> {
+    const previous = statusRef.current
+    if (previous.state === 'ready') return true
+    if (previous.state !== 'installed' && !(previous.state === 'error' && previous.installationId)) return false
+    update({ ...previous, state: 'loading', message: 'Loading TensorFold into memory.' })
     try {
-      const result = await Engine.loadModel(engineStatus.installationId)
-      setEngineStatus(result)
+      const result = await Engine.loadModel(previous.installationId)
+      update(result)
+      return result.state === 'ready'
     } catch (error) {
-      setEngineStatus({ state: 'error', installationId: engineStatus.installationId, message: error instanceof Error ? error.message : 'Model loading failed.' })
+      update({ ...previous, state: 'error', message: error instanceof Error ? error.message : 'Model loading failed.' })
+      return false
     }
   }
 
-  return { capabilities, status: engineStatus, installModel, loadModel, cancelModelInstall, unloadModel }
+  return { capabilities, status: engineStatus, statusRef, installModel, loadModel, cancelModelInstall, unloadModel }
 }

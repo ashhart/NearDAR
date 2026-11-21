@@ -1,6 +1,7 @@
 import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from 'react'
 import { AccessibilityInfo, Platform } from 'react-native'
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake'
+import { selectionAsync } from 'expo-haptics'
 import * as Engine from '../../../modules/tensorfold-engine/src'
 import * as Perception from '../../../modules/tensorfold-perception/src'
 import * as Voice from '../../../modules/tensorfold-voice/src'
@@ -9,11 +10,12 @@ import * as Haptics from '../../../modules/tensorfold-haptics/src'
 import { useAppSettings } from '../SettingsContext'
 import { WarningGate } from './alerts'
 import { parseIntent } from './intents'
-import { answerAhead, answerQuestion, answerText, buildGenerationRequest, requestedObject, requestedSide, sensorLimit, validatedGeneratedAnswer } from './scene'
+import { answerAhead, answerMeasuredAhead, answerQuestion, answerText, buildGenerationRequest, cameraRecoveryHint, requestedObject, requestedSide, seatAlignmentTarget, sensorLimit, validatedGeneratedAnswer } from './scene'
 import { answerErrand, errandHasLabel, findErrand, shoppingCommand, type Errand, type ShoppingCommand } from './errands'
 import { mergeVisionEvidence, visionPrompt } from './vision'
 import { describeCurrentLocation } from './location'
 import { normalizeCompanionName } from '../settings'
+import { announce } from '../accessibility'
 import { useVisionModel } from './useVisionModel'
 import { useConversationModel } from './useConversationModel'
 import type { GuidanceController, GuidanceReply, SceneSnapshot, SceneWarning, SessionState, VoiceCapabilities } from './types'
@@ -41,13 +43,17 @@ export function GuidanceProvider({ children }: { children: ReactNode }) {
   const [handsFree, setHandsFree] = useState(false)
   const [speaking, setSpeaking] = useState(false)
   const [lastReply, setLastReply] = useState<GuidanceReply>()
+  const [alignment, setAlignment] = useState<GuidanceController['alignment']>()
   const [questionPhase, setQuestionPhase] = useState<GuidanceController['questionPhase']>(null)
   const [voiceNotice, setVoiceNotice] = useState<string>()
   const [voiceModelMissing, setVoiceModelMissing] = useState(false)
   const [speechDownloadPending, setSpeechDownloadPending] = useState(false)
   const [warning, setWarning] = useState<SceneWarning>()
   const [snapshot, setSnapshot] = useState<SceneSnapshot>()
-  const { capabilities: engine, status: engineStatus, ...engineControls } = useConversationModel(setStatusMessage)
+  const [cameraHint, setCameraHint] = useState<string>()
+  const [cameraPreviewAvailable, setCameraPreviewAvailable] = useState(false)
+  const conversation = useConversationModel(setStatusMessage)
+  const { capabilities: engine, status: engineStatus } = conversation
   const [voice, setVoice] = useState<VoiceCapabilities>()
   const visual = useVisionModel()
   const settingsRef = useRef(settings)
@@ -59,7 +65,9 @@ export function GuidanceProvider({ children }: { children: ReactNode }) {
   const gate = useRef(new WarningGate())
   const requestCounter = useRef(0)
   const activeRequest = useRef<string | undefined>(undefined)
+  const conversationWork = useRef<Promise<string | undefined> | undefined>(undefined)
   const activeVisionRequest = useRef<string | undefined>(undefined)
+  const activeAlignment = useRef<symbol | undefined>(undefined)
   const previousRoute = useRef<VoiceCapabilities['route']>('unknown')
   const voiceRecognition = useRef<boolean | undefined>(undefined)
   const depthExpected = useRef(false)
@@ -81,12 +89,43 @@ export function GuidanceProvider({ children }: { children: ReactNode }) {
   const locationRequest = useRef<AbortController | null>(null)
   const textEntry = useRef(false)
   const resumeListeningRef = useRef(resumeListening)
+  const statusSpeechRef = useRef(speak)
+  const latestView = useRef(snapshot)
+  const readinessAnnounced = useRef(false)
+  const cameraActive = state === 'active' || state === 'degraded'
+  const cameraReady = cameraActive && !sensorLimit(snapshot)
   settingsRef.current = settings
   stateRef.current = state
   listeningRef.current = listening
   speakingRef.current = speaking
   transcriptAction.current = (text) => { void processQuestion(text) }
   resumeListeningRef.current = resumeListening
+  statusSpeechRef.current = speak
+  latestView.current = snapshot
+
+  useEffect(() => {
+    if (!cameraActive) {
+      readinessAnnounced.current = false
+      setCameraHint(undefined)
+      return
+    }
+    if (cameraReady) {
+      setCameraHint(undefined)
+      if (!readinessAnnounced.current) {
+        readinessAnnounced.current = true
+        if (settingsRef.current.urgentHaptics) void selectionAsync().catch(() => {})
+        if (!processingRequest.current) void statusSpeechRef.current('Camera ready. You can ask a question.')
+      }
+      return
+    }
+    const timer = setTimeout(() => {
+      readinessAnnounced.current = false
+      const hint = cameraRecoveryHint(latestView.current)
+      setCameraHint(hint)
+      if (!processingRequest.current) void statusSpeechRef.current(hint)
+    }, 4_000)
+    return () => clearTimeout(timer)
+  }, [cameraActive, cameraReady])
 
   async function resumeListening() {
     if (handsFreeRef.current) await beginListening()
@@ -143,6 +182,17 @@ export function GuidanceProvider({ children }: { children: ReactNode }) {
     if (epoch !== cameraEpoch.current || speechId.current !== utteranceId) return
     listeningRef.current = false
     setListening(false)
+    if (Platform.OS === 'ios' && !urgent && !handsFreeRef.current) {
+      const voiceOver = await AccessibilityInfo.isScreenReaderEnabled().catch(() => false)
+      if (epoch !== cameraEpoch.current || speechId.current !== utteranceId) return
+      if (voiceOver && !handsFreeRef.current) {
+        speechId.current = undefined
+        speakingRef.current = false
+        setSpeaking(false)
+        announce(text)
+        return
+      }
+    }
     try {
       await Voice.speak(text, {
         utteranceId,
@@ -165,6 +215,12 @@ export function GuidanceProvider({ children }: { children: ReactNode }) {
   async function pause(silent = false) {
     if (pausing.current) return
     pausing.current = true
+    activeAlignment.current = undefined
+    setAlignment(undefined)
+    if (replyRef.current?.seatTarget) {
+      replyRef.current = { ...replyRef.current, seatTarget: undefined }
+      setLastReply(replyRef.current)
+    }
     cameraEpoch.current += 1
     errandRef.current = undefined
     speechId.current = undefined
@@ -198,6 +254,9 @@ export function GuidanceProvider({ children }: { children: ReactNode }) {
   async function handleWarning(warning: SceneWarning) {
     const running = stateRef.current === 'active' || stateRef.current === 'degraded'
     if (!running || pausing.current || !gate.current.accept(warning)) return
+    if (activeAlignment.current && warning.severity === 'urgent') {
+      void cancelAlignment('Alignment stopped. Check the nearby obstacle.')
+    }
     setWarning(warning)
     setStatusMessage(warning.message)
     if (settingsRef.current.urgentHaptics && (warning.severity !== 'info' || warning.kind === 'sensor')) {
@@ -246,8 +305,9 @@ export function GuidanceProvider({ children }: { children: ReactNode }) {
         return
       }
       depthExpected.current = startedCapabilities.depth
+      setCameraPreviewAvailable(startedCapabilities.cameraPreview === true)
       updateState(depthExpected.current ? 'active' : 'degraded', depthExpected.current ? 'Point the camera at what you want to inspect.' : 'Camera is on. Depth measurements are unavailable.')
-      void visual.prepare(false)
+      void prepareVision(false)
       const opening = handsFreeRef.current ? 'Hands-free is on. Try asking what’s on my left. Say stop camera to finish.' : 'Camera on.'
       await speak(depthExpected.current ? opening : `${opening} Distance and obstacle alerts are unavailable.`)
     } catch (error) {
@@ -287,12 +347,22 @@ export function GuidanceProvider({ children }: { children: ReactNode }) {
   }
 
   async function processQuestion(question: string, retry?: Errand) {
+    const intent = parseIntent(question)
+    if (intent.kind === 'align-seat') {
+      await alignToSeat()
+      return
+    }
+    if (intent.kind === 'stop-alignment') {
+      await cancelAlignment()
+      await speak('Alignment stopped.')
+      return
+    }
+    if (activeAlignment.current || alignment) void cancelAlignment()
     const shopping = retry ? undefined : shoppingCommand(question)
     if (shopping) {
       if (!processingRequest.current && !pausing.current) await handleShopping(shopping)
       return
     }
-    const intent = parseIntent(question)
     if (intent.kind === 'stop-session') {
       await pause()
       return
@@ -328,10 +398,18 @@ export function GuidanceProvider({ children }: { children: ReactNode }) {
       await deliverReply({ text: name ? `I’ll call you ${name}.` : 'I’ve cleared your saved name.' })
       return
     }
-    if (stateRef.current !== 'active' && stateRef.current !== 'degraded') await start()
+    const cameraWasRunning = stateRef.current === 'active' || stateRef.current === 'degraded'
+    if (!cameraWasRunning) await start()
     if (pausing.current || processingRequest.current || (stateRef.current !== 'active' && stateRef.current !== 'degraded')) return
     const errand = retry ?? findErrand(question, intent, errandRef.current)
     if (errand) errandRef.current = errand
+    if (cameraWasRunning && !errand && intent.kind === 'ahead') {
+      const measured = answerMeasuredAhead(snapshot)
+      if (measured) {
+        await deliverReply({ question, source: 'view', text: measured })
+        return
+      }
+    }
     const canUseVisual = intent.kind !== 'read' && errand?.kind !== 'checkout' && !(errand?.kind === 'item' && errand.verify)
     requestCounter.current += 1
     const requestId = `scene-${Date.now()}-${requestCounter.current}`
@@ -344,9 +422,9 @@ export function GuidanceProvider({ children }: { children: ReactNode }) {
       setListening(false)
       listeningRef.current = false
       if (processingRequest.current !== requestId) return
-      if (canUseVisual && errand?.kind !== 'item' && visual.statusRef.current.state === 'loading') {
+      if (canUseVisual && ['installed', 'loading'].includes(visual.statusRef.current.state)) {
         setQuestionPhase('loading-model')
-        await visual.prepare(false)
+        await prepareVision(false)
         if (processingRequest.current !== requestId) return
       }
       setQuestionPhase('capturing')
@@ -354,7 +432,11 @@ export function GuidanceProvider({ children }: { children: ReactNode }) {
       if (errand?.kind === 'seat' && !useVisual && visual.capabilities?.available) {
         detail = 'Get offline descriptions to check whether a visible seat looks empty.'
       }
-      const captured = await Perception.captureScene({ includeImage: useVisual, recognizeText: intent.kind === 'read' || intent.kind === 'question' || errand?.kind === 'checkout' })
+      const captured = await Perception.captureScene({
+        includeImage: useVisual,
+        maxImageLongEdge: 512,
+        recognizeText: intent.kind === 'read' || intent.kind === 'question' || errand?.kind === 'checkout',
+      })
       let nextSnapshot: SceneSnapshot = captured
       const captureWasFresh = captured.trackingReady && Date.now() - captured.observedAt <= 3_000
       if (useVisual && !errandHasLabel(errand, captured) && processingRequest.current === requestId && captureWasFresh && (captured.imageBase64 || captured.temporaryImagePath)) {
@@ -385,17 +467,8 @@ export function GuidanceProvider({ children }: { children: ReactNode }) {
       if (processingRequest.current !== requestId) return
       const storedSnapshot = { ...nextSnapshot, imageBase64: undefined, temporaryImagePath: undefined }
       let generatedAnswer: string | undefined
-      if (!errand && engineStatus.state === 'ready' && intent.kind === 'question' && !requestedObject(intent.question).length && !requestedSide(intent.question)) {
-        setQuestionPhase('answering')
-        activeRequest.current = requestId
-        try {
-          const raw = await Engine.generate(buildGenerationRequest(intent.question, storedSnapshot, requestId))
-          generatedAnswer = validatedGeneratedAnswer(raw, nextSnapshot) || undefined
-        } catch (error) {
-          if (processingRequest.current === requestId) setStatusMessage(error instanceof Error ? error.message : 'TensorFold inference is unavailable; using measured scene facts.')
-        } finally {
-          if (activeRequest.current === requestId) activeRequest.current = undefined
-        }
+      if (!errand && captureWasFresh && intent.kind === 'question' && !requestedObject(intent.question).length && !requestedSide(intent.question)) {
+        generatedAnswer = await runConversation(intent.question, storedSnapshot, requestId)
       }
       if (processingRequest.current !== requestId) return
       const frozenResponse = captureWasFresh && Date.now() - captured.observedAt > 3_000
@@ -405,7 +478,9 @@ export function GuidanceProvider({ children }: { children: ReactNode }) {
       const answer = frozenResponse && !responseLimit ? `From the captured view. ${selected}` : selected
       if (processingRequest.current === requestId) processingRequest.current = undefined
       setQuestionPhase(null)
-      await deliverReply({ ...reply, text: answer, detail })
+      const seatTarget = Platform.OS === 'ios' && errand?.kind === 'seat' && !responseLimit ? seatAlignmentTarget(storedSnapshot, captured) : undefined
+      const text = seatTarget && handsFreeRef.current ? `${answer} Say “align to the seat” for a tap.` : answer
+      await deliverReply({ ...reply, text, detail, seatTarget })
     } catch (error) {
       if (activeRequest.current === requestId) activeRequest.current = undefined
       if (activeVisionRequest.current === `${requestId}-vision`) activeVisionRequest.current = undefined
@@ -416,6 +491,74 @@ export function GuidanceProvider({ children }: { children: ReactNode }) {
       const answer = 'I could not inspect this view. Keep the camera uncovered and try again.'
       await deliverReply({ ...reply, text: answer, detail: message })
     }
+  }
+
+  async function prepareVision(download = true): Promise<boolean> {
+    if (conversationWork.current) await conversationWork.current
+    const modelState = conversation.statusRef.current.state
+    if (modelState === 'unloading' || (modelState === 'ready' && !await conversation.unloadModel())) return false
+    return visual.prepare(download)
+  }
+
+  function runConversation(question: string, captured: SceneSnapshot, requestId: string): Promise<string | undefined> | undefined {
+    const status = conversation.statusRef.current
+    const installed = status.state === 'installed' || status.state === 'ready' || (status.state === 'error' && status.installationId)
+    const factsAvailable = captured.objects.length || captured.freeSeats.length || captured.recognizedText.length
+    if (!engine?.available || !installed || !factsAvailable || conversationWork.current) return
+
+    setQuestionPhase('answering')
+    conversationWork.current = Promise.resolve().then(async () => {
+      try {
+        if (!await visual.unload(false) || processingRequest.current !== requestId) return
+        if (!await conversation.loadModel() || processingRequest.current !== requestId) return
+        activeRequest.current = requestId
+        const raw = await Engine.generate(buildGenerationRequest(question, captured, requestId))
+        return validatedGeneratedAnswer(raw, captured) || undefined
+      } catch {
+        if (processingRequest.current === requestId) setStatusMessage('TensorFold couldn’t answer. Showing the available camera information.')
+      } finally {
+        if (activeRequest.current === requestId) activeRequest.current = undefined
+        await conversation.unloadModel()
+        conversationWork.current = undefined
+      }
+    })
+    return conversationWork.current
+  }
+
+  async function cancelAlignment(message?: string) {
+    const running = !!activeAlignment.current
+    activeAlignment.current = undefined
+    setAlignment(message ? { active: false, message } : undefined)
+    if (running) await Perception.cancelSeatAlignment().catch(() => {})
+  }
+
+  async function alignToSeat() {
+    if (activeAlignment.current || processingRequest.current || pausing.current) return
+    const target = replyRef.current?.seatTarget
+    if (stateRef.current !== 'active' || !target || Date.now() - target.observedAt > 45_000) {
+      await speak('I need a fresh LiDAR reading of the seat. Try finding a seat again on a supported iPhone.')
+      return
+    }
+    const request = Symbol('seat alignment')
+    activeAlignment.current = request
+    const message = 'Stay where you are and turn your phone slowly. You’ll feel a tap when it points toward the seat.'
+    setAlignment({ active: true, message })
+    await speak(message)
+    if (activeAlignment.current !== request) return
+    const result = await Perception.alignToSeat(target.id, target.observedAt).catch(() => 'unavailable' as const)
+    if (activeAlignment.current !== request) return
+    activeAlignment.current = undefined
+    const feedback = {
+      aligned: 'Your phone is pointing toward the seat. Check your surroundings before moving.',
+      moved: 'Alignment stopped because the phone moved. Find the seat again to refresh its position.',
+      'tracking-lost': 'Camera tracking was lost. Find the seat again to refresh its position.',
+      'timed-out': 'I couldn’t confirm the direction. Find the seat again to refresh its position.',
+      unavailable: 'The seat position is unavailable. Find the seat again for a fresh reading.',
+      cancelled: 'Alignment stopped.',
+    }[result]
+    if (result === 'aligned') void selectionAsync().catch(() => {})
+    setAlignment({ active: false, message: feedback })
+    if (result !== 'cancelled') await speak(feedback)
   }
   async function deliverReply(reply: GuidanceReply) {
     replyRef.current = reply
@@ -579,7 +722,6 @@ export function GuidanceProvider({ children }: { children: ReactNode }) {
         } else if (healthy && sensorDegraded.current) {
           sensorDegraded.current = false
           updateState('active', 'Camera tracking and required depth are ready.')
-          void speak('Camera tracking recovered.')
         }
         setSnapshot(event.snapshot)
       }
@@ -620,6 +762,7 @@ export function GuidanceProvider({ children }: { children: ReactNode }) {
     })
     return () => {
       pausing.current = true
+      activeAlignment.current = undefined
       processingRequest.current = undefined
       locationRequest.current?.abort()
       perceptionEvents.remove()
@@ -631,11 +774,12 @@ export function GuidanceProvider({ children }: { children: ReactNode }) {
   }, [])
   const controller: GuidanceController = {
     state, startPending, cameraPermissionBlocked, statusMessage, listening, handsFree, speaking, questionPhase, voiceNotice,
-    voiceModelMissing, speechDownloadPending, warning, lastReply, snapshot, shoppingList,
+    voiceModelMissing, speechDownloadPending, warning, lastReply, alignment, snapshot, shoppingList, cameraReady, cameraHint, cameraPreviewAvailable,
     engine, engineStatus, vision: visual.capabilities, visionStatus: visual.status, voice,
-    ...engineControls,
-    prepareVisionModel: visual.prepare, cancelVisionInstall: visual.cancelInstall, unloadVisionModel: visual.unload,
-    start, stop: pause, ask, enableHandsFree, downloadOfflineSpeech, stopListeningInput, setTextEntry, repeat, checkAgain, checkLabel, stopSpeech,
+    installModel: conversation.installModel, cancelModelInstall: conversation.cancelModelInstall,
+    prepareVisionModel: prepareVision, cancelVisionInstall: visual.cancelInstall, unloadVisionModel: async () => { await visual.unload() },
+    start, stop: pause, ask, enableHandsFree, downloadOfflineSpeech, stopListeningInput, setTextEntry, repeat, checkAgain, checkLabel, alignToSeat, cancelAlignment,
+    stopSpeech,
   }
 
   return <Context.Provider value={controller}>{children}</Context.Provider>

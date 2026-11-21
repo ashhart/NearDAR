@@ -1,9 +1,11 @@
-import { useEffect, useRef, useState } from 'react'
-import { AccessibilityInfo, Keyboard, Linking, Platform, StyleSheet, Text, TextInput, View } from 'react-native'
-import { router } from 'expo-router'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { Keyboard, Linking, Platform, StyleSheet, Text, TextInput, View, type ViewProps } from 'react-native'
+import { router, useFocusEffect, useLocalSearchParams } from 'expo-router'
+import { requireNativeViewManager } from 'expo-modules-core'
 import { Body, Button, Heading, Icon, Label, Screen, Signal, StatusCard, TopBar, useColors } from '../components/ui'
 import { useGuidance } from '../lib/guidance/useGuidance'
 import { useAppSettings } from '../lib/SettingsContext'
+import { announce, focusAccessible } from '../lib/accessibility'
 
 const actions = [
   { label: 'Find a seat', icon: 'restaurant-outline', question: 'Which seat looks free?' },
@@ -21,19 +23,28 @@ const phases = {
   locating: 'Looking up your location',
 }
 
+function CameraPreview(props: ViewProps) {
+  const [Preview] = useState(() => requireNativeViewManager<ViewProps & { playing: boolean }>('TensorFoldPerception'))
+  return <Preview {...props} playing />
+}
+
 export default function Guide() {
   const guide = useGuidance()
+  const { setup } = useLocalSearchParams<{ setup?: string }>()
   const { settings } = useAppSettings()
   const colors = useColors()
   const [typing, setTyping] = useState<'question' | 'product' | null>(null)
   const [question, setQuestion] = useState('')
+  const [showPreview, setShowPreview] = useState(false)
   const openingScreen = useRef(false)
   const typeButton = useRef<View>(null)
+  const startButton = useRef<View>(null)
+  const focusedAfterSetup = useRef(false)
   const restoreFocus = useRef(false)
   const active = guide.state === 'active' || guide.state === 'degraded'
   const stopping = guide.state === 'stopping'
   const starting = guide.state === 'starting'
-  const seen = !!guide.snapshot?.trackingReady
+  const seen = guide.cameraReady
   const busy = !!guide.questionPhase
   const canAsk = active && seen && !busy
   const voiceInput = guide.voice?.onDeviceRecognition === true
@@ -44,7 +55,7 @@ export default function Guide() {
   const depthReady = guide.snapshot?.depthState === 'ready'
   const warning = active && guide.warning && Date.now() - guide.warning.observedAt <= 3_000 ? guide.warning : undefined
   const phase = guide.questionPhase ? phases[guide.questionPhase] : guide.listening ? 'Listening. Ask your question.' : guide.speaking && active ? 'Speaking' : guide.handsFree && active ? 'Hands-free on' : undefined
-  const cameraStatus = stopping ? 'Stopping camera' : starting ? 'Starting camera' : active ? 'Camera on' : 'Camera off'
+  const cameraStatus = stopping ? 'Stopping camera' : starting ? 'Starting camera' : seen ? 'Camera ready' : active ? 'Camera on' : 'Camera off'
   const output = guide.voice?.route === 'headphones' ? 'Headphones' : guide.voice?.route === 'speaker' && settings.speakerFallback ? 'Phone speaker' : undefined
   const reply = guide.lastReply
   const checkingProduct = reply?.errand?.kind === 'item'
@@ -53,9 +64,23 @@ export default function Guide() {
     const target = typeButton.current
     if (typing || busy || !restoreFocus.current || !target || !active) return
     restoreFocus.current = false
-    if (Platform.OS === 'web') target.focus()
-    else AccessibilityInfo.sendAccessibilityEvent(target, 'focus')
+    focusAccessible(target)
   }, [active, busy, typing])
+
+  useFocusEffect(useCallback(() => {
+    if (!setup || focusedAfterSetup.current || active || starting || stopping) return
+    const timer = setTimeout(() => {
+      if (!startButton.current) return
+      focusedAfterSetup.current = true
+      focusAccessible(startButton.current)
+      if (setup === 'downloaded') announce('Offline descriptions are downloaded and ready.')
+    }, 350)
+    return () => clearTimeout(timer)
+  }, [active, setup, starting, stopping]))
+
+  useEffect(() => {
+    if (!active) setShowPreview(false)
+  }, [active])
 
   function closeTyping() {
     restoreFocus.current = true
@@ -114,20 +139,21 @@ export default function Guide() {
 
     <View style={[styles.welcome, { backgroundColor: colors.raised }]}>
       <View style={styles.statusRow}>
-        <Signal live tone={active ? 'ready' : 'quiet'}>{cameraStatus}</Signal>
+        <Signal live={Platform.OS !== 'ios' && !guide.voice?.offlineSpeech} tone={seen ? 'ready' : 'quiet'}>{cameraStatus}</Signal>
         {active && output && <View style={styles.output}><Icon name={guide.voice?.route === 'headphones' ? 'headset-outline' : 'volume-medium-outline'} color={colors.muted} size={18} /><Text style={[styles.outputText, { color: colors.muted }]}>{output}</Text></View>}
       </View>
-      <Heading editorial focusOnEntry>{active ? 'How can I help?' : settings.companionName ? `Hello, ${settings.companionName}` : 'Explore nearby'}</Heading>
+      <Heading editorial focusOnEntry={!setup}>{active ? 'How can I help?' : settings.companionName ? `Hello, ${settings.companionName}` : 'Explore nearby'}</Heading>
       <Body muted>{guide.state === 'error' ? guide.statusMessage : active ? 'Point your phone at what you want to ask about.' : 'Hear what’s nearby, find a seat or read something aloud.'}</Body>
-      {active && !seen && !busy && <Body muted>Getting a clear view. Hold the phone steady for a moment.</Body>}
+      {active && !seen && !busy && <Body muted>{guide.cameraHint ?? 'Getting a clear view. Hold the phone steady for a moment.'}</Body>}
       {guide.voiceNotice && <Body muted live>{guide.voiceNotice}</Body>}
       {!busy && guide.voiceModelMissing && Platform.OS === 'android' && Platform.Version >= 34 &&
         <Button secondary label="Download offline speech" icon="download-outline" hint="Uses an internet connection once to prepare voice input." busy={guide.speechDownloadPending} onPress={() => void guide.downloadOfflineSpeech()} />}
 
       {phase && <Text aria-live="polite" style={[styles.phase, { color: colors.text }]}>{phase}</Text>}
       {busy ? <Button secondary label="Cancel question" icon="close-outline" onPress={() => void guide.stopSpeech()} /> : !active ? <>
-        {voiceInput && <Button label="Start hands-free" icon="mic-outline" hint="Turns on the camera. The microphone listens again after each reply." busy={guide.startPending || stopping} onPress={() => startCamera(true)} />}
+        {voiceInput && <Button hostRef={startButton} label="Start hands-free" icon="mic-outline" hint="Turns on the camera. The microphone listens again after each reply." busy={guide.startPending || stopping} onPress={() => startCamera(true)} />}
         <Button
+          hostRef={voiceInput ? undefined : startButton}
           label={guide.state === 'error' ? 'Retry camera' : 'Start camera'}
           icon="camera-outline"
           secondary={voiceInput}
@@ -167,6 +193,11 @@ export default function Guide() {
         </>}
     </View>
 
+    {active && guide.cameraPreviewAvailable && <View style={styles.previewControls}>
+      <Button compact secondary label={showPreview ? 'Hide camera preview' : 'Show camera preview'} expanded={showPreview} icon="camera-outline" onPress={() => setShowPreview(!showPreview)} />
+      {showPreview && <CameraPreview accessibilityElementsHidden aria-hidden importantForAccessibility="no-hide-descendants" pointerEvents="none" style={styles.cameraPreview} />}
+    </View>}
+
     {warning && <View style={[styles.warning, { backgroundColor: colors.warningSurface }]}>
       <Icon name="warning-outline" color={colors.warning} />
       <Text style={[styles.warningText, { color: colors.warning }]}>{warning.message}</Text>
@@ -174,8 +205,11 @@ export default function Guide() {
 
     {reply && <StatusCard title="Last answer">
       {reply.question && <Body muted>You asked “{reply.question}”</Body>}
-      <Text aria-live={guide.voice?.offlineSpeech ? undefined : 'polite'} style={[styles.answer, { color: colors.text }]}>{reply.text}</Text>
+      <Text aria-live={Platform.OS !== 'ios' && !guide.voice?.offlineSpeech ? 'polite' : undefined} style={[styles.answer, { color: colors.text }]}>{reply.text}</Text>
       {reply.detail && <Body muted>{reply.detail}</Body>}
+      {guide.alignment && <Body muted live={Platform.OS !== 'ios' && !guide.voice?.offlineSpeech}>{guide.alignment.message}</Body>}
+      {guide.alignment?.active ? <Button secondary label="Stop alignment" icon="close-outline" onPress={() => void guide.cancelAlignment()} />
+        : guide.state === 'active' && depthReady && reply.seatTarget && Date.now() - reply.seatTarget.observedAt <= 45_000 && <Button secondary label="Align to the seat" icon="compass-outline" disabled={busy || !!typing} hint="Stay where you are. Turn your phone slowly until you feel a tap." onPress={() => void guide.alignToSeat()} />}
       <View style={styles.actions}>
         {reply.question && (reply.source === 'location' || canAsk) && <Button compact secondary label="Check again" icon="refresh-outline" disabled={busy || starting || stopping || !!typing} hint={reply.source === 'view' ? 'Takes a fresh camera image for the same question.' : 'Looks up your location again.'} onPress={() => void guide.checkAgain()} />}
         {active && checkingProduct && <Button compact secondary label="Check the label" icon="text-outline" disabled={!canAsk || !!typing} hint="Hold one product label close to the camera." onPress={() => void guide.checkLabel()} />}
@@ -208,6 +242,8 @@ export default function Guide() {
 }
 
 const styles = StyleSheet.create({
+  previewControls: { gap: 10 },
+  cameraPreview: { width: '100%', aspectRatio: 4 / 3, overflow: 'hidden', borderRadius: 16, backgroundColor: '#000' },
   welcome: { padding: 18, gap: 13, borderRadius: 25 },
   statusRow: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
   output: { flexDirection: 'row', alignItems: 'center', gap: 5 },

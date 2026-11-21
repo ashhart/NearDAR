@@ -23,8 +23,12 @@ function freshPosition(location: LocationModule, signal: AbortSignal): Promise<L
     if (signal.aborted) return finish()
     signal.addEventListener('abort', finishAborted, { once: true })
     void location.watchPositionAsync(
-      { accuracy: location.Accuracy.Balanced, timeInterval: 1_000, distanceInterval: 0, mayShowUserSettingsDialog: false },
-      (position) => { if (Date.now() - position.timestamp <= 15_000) finish(position) },
+      { accuracy: location.Accuracy.High, timeInterval: 1_000, distanceInterval: 0, mayShowUserSettingsDialog: false },
+      (position) => {
+        const age = Date.now() - position.timestamp
+        const { latitude, longitude } = position.coords
+        if (age >= -1_000 && age <= 15_000 && Math.abs(latitude) <= 90 && Math.abs(longitude) <= 180) finish(position)
+      },
       finishAborted,
     ).then((watch) => {
       if (finished) watch.remove()
@@ -46,12 +50,18 @@ async function nearbyAddress(location: LocationModule, position: LocationObject,
     signal.addEventListener('abort', cancel, { once: true })
     void location.reverseGeocodeAsync(position.coords).then(([place]) => {
       if (!place) return finish()
-      const street = position.coords.accuracy !== null && position.coords.accuracy <= 120 ? place.street : null
+      const accuracy = reportedAccuracy(position)
+      if (accuracy === undefined || accuracy > 2_000) return finish(place.city || place.region || undefined)
+      const street = accuracy <= 120 ? place.street : null
       const pieces = [street, place.district || place.city || place.subregion, place.city || place.region]
         .filter((part): part is string => !!part)
       finish([...new Set(pieces)].join(', '))
     }, cancel)
   })
+}
+
+function reportedAccuracy({ coords: { accuracy } }: LocationObject): number | undefined {
+  return accuracy !== null && Number.isFinite(accuracy) && accuracy > 0 ? accuracy : undefined
 }
 
 export async function describeCurrentLocation(signal: AbortSignal, permissionPending: (pending: boolean) => void): Promise<string | undefined> {
@@ -72,12 +82,17 @@ export async function describeCurrentLocation(signal: AbortSignal, permissionPen
   }
   if (signal.aborted) return
   if (!granted) return 'Location access is off. You can allow it in your phone settings.'
+  const enabled = await location.hasServicesEnabledAsync()
+  if (signal.aborted) return
+  if (!enabled) return 'Location services are off. Turn them on in your phone settings to check where you are.'
   const position = await freshPosition(location, signal)
   if (signal.aborted) return
   if (!position) return 'I couldn’t get a current location. Try again where your phone has a clearer signal.'
   const address = await nearbyAddress(location, position, signal)
   if (signal.aborted) return
   const { latitude, longitude } = position.coords
-  const coordinates = `${Math.abs(latitude).toFixed(4)} degrees ${latitude < 0 ? 'south' : 'north'}, ${Math.abs(longitude).toFixed(4)} degrees ${longitude < 0 ? 'west' : 'east'}`
+  const accuracy = reportedAccuracy(position)
+  const decimals = accuracy === undefined ? 2 : accuracy <= 30 ? 4 : accuracy <= 300 ? 3 : accuracy <= 3_000 ? 2 : 1
+  const coordinates = `${Math.abs(latitude).toFixed(decimals)} degrees ${latitude < 0 ? 'south' : 'north'}, ${Math.abs(longitude).toFixed(decimals)} degrees ${longitude < 0 ? 'west' : 'east'}`
   return address ? `Your phone puts you near ${address}.` : `Your approximate coordinates are ${coordinates}. I couldn’t look up the street name.`
 }

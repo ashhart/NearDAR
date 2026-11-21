@@ -39,6 +39,14 @@ export function sensorLimit(snapshot?: SceneSnapshot, allowFrozen = false): stri
   return null
 }
 
+export function cameraRecoveryHint(snapshot?: SceneSnapshot): string {
+  const notes = snapshot?.notes.join(' ').toLowerCase() ?? ''
+  if (notes.includes('excessive motion')) return 'The camera is moving too quickly to track. Hold the phone steady for a moment.'
+  if (notes.includes('visible surface detail')) return 'The camera needs more detail to track. Point it at a well-lit object or textured surface.'
+  if (notes.includes('recovering')) return 'The camera is finding its position again. Slowly turn the phone back toward what you last pointed at.'
+  return 'The camera is still getting a usable view. Keep the lens uncovered and hold the phone steady.'
+}
+
 export function answerAhead(snapshot?: SceneSnapshot, allowFrozen = false, side?: 'left' | 'right'): string {
   const limit = sensorLimit(snapshot, allowFrozen)
   if (limit) return limit
@@ -53,17 +61,43 @@ export function answerAhead(snapshot?: SceneSnapshot, allowFrozen = false, side?
   return objects.map(objectPhrase).join('. ') + '.'
 }
 
+export function answerMeasuredAhead(snapshot?: SceneSnapshot, now = Date.now()): string | undefined {
+  if (!snapshot?.trackingReady || snapshot.depthState !== 'ready') return
+  const age = now - snapshot.observedAt
+  if (!Number.isFinite(age) || age < 0 || age > 750) return
+  const objects = snapshot.objects.filter((object) => object.confidence >= 0.4 && object.direction !== 'unknown' &&
+    object.distanceMeters !== undefined && Number.isFinite(object.distanceMeters) && object.distanceMeters > 0 &&
+    !object.evidence.includes('on-device-vlm'))
+  if (objects.length) return answerAhead({ ...snapshot, objects, freeSeats: [] }, true)
+}
+
+function matchedFreeSeat(snapshot: SceneSnapshot) {
+  return snapshot.freeSeats
+    .filter((seat) => seat.free && seat.evidence.includes('on-device-vlm'))
+    .sort((first, second) => (first.distanceMeters ?? Infinity) - (second.distanceMeters ?? Infinity))[0]
+}
+
+function visibleSeat(snapshot: SceneSnapshot) {
+  return snapshot.objects.find((object) => /^(chair|seat|bench|stool)$/.test(object.label))
+}
+
+export function seatAlignmentTarget(snapshot: SceneSnapshot, captured: SceneSnapshot) {
+  if (!snapshot.trackingReady || snapshot.depthState !== 'ready') return
+  const matched = matchedFreeSeat(snapshot)
+  const seat = matched ? captured.objects.find(({ id }) => matched.id === id || matched.id === `candidate-${id}`) : visibleSeat(snapshot)
+  if (!seat?.id.startsWith('mesh-') || seat.distanceMeters === undefined || seat.distanceMeters < 0.5 || seat.distanceMeters > 5) return
+  return { id: seat.id, observedAt: snapshot.observedAt }
+}
+
 export function answerSeats(snapshot?: SceneSnapshot, allowFrozen = false, guided = false): string {
   const limit = sensorLimit(snapshot, allowFrozen)
   if (limit) return limit
-  const matched = snapshot!.freeSeats
-    .filter((seat) => seat.free && seat.evidence.includes('on-device-vlm'))
-    .sort((first, second) => (first.distanceMeters ?? Infinity) - (second.distanceMeters ?? Infinity))[0]
+  const matched = matchedFreeSeat(snapshot!)
   if (matched) {
     const distance = distancePhrase(matched)
     return `A ${matched.label} ${directionPhrase(matched.direction)}${distance ? `, ${distance} away,` : ''} appears unoccupied. Check before sitting.`
   }
-  const visible = snapshot!.objects.find((object) => /^(chair|seat|bench|stool)$/.test(object.label))
+  const visible = visibleSeat(snapshot!)
   if (visible) {
     const next = guided ? 'Point the camera at the whole seat and say “check again”.' : 'Ask someone nearby to confirm.'
     return `There appears to be a ${visible.label} ${directionPhrase(visible.direction)}. I can’t tell if it’s free. ${next}`
