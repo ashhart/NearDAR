@@ -143,6 +143,17 @@ export function GuidanceProvider({ children }: { children: ReactNode }) {
     if (epoch !== cameraEpoch.current || speechId.current !== utteranceId) return
     listeningRef.current = false
     setListening(false)
+    if (Platform.OS === 'ios' && !urgent && !handsFreeRef.current) {
+      const voiceOver = await AccessibilityInfo.isScreenReaderEnabled().catch(() => false)
+      if (epoch !== cameraEpoch.current || speechId.current !== utteranceId) return
+      if (voiceOver && !handsFreeRef.current) {
+        speechId.current = undefined
+        speakingRef.current = false
+        setSpeaking(false)
+        AccessibilityInfo.announceForAccessibilityWithOptions(text, { queue: true })
+        return
+      }
+    }
     try {
       await Voice.speak(text, {
         utteranceId,

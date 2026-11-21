@@ -174,7 +174,7 @@ export default function Guide() {
 
     {reply && <StatusCard title="Last answer">
       {reply.question && <Body muted>You asked “{reply.question}”</Body>}
-      <Text aria-live={guide.voice?.offlineSpeech ? undefined : 'polite'} style={[styles.answer, { color: colors.text }]}>{reply.text}</Text>
+      <Text aria-live={Platform.OS !== 'ios' && !guide.voice?.offlineSpeech ? 'polite' : undefined} style={[styles.answer, { color: colors.text }]}>{reply.text}</Text>
       {reply.detail && <Body muted>{reply.detail}</Body>}
       <View style={styles.actions}>
         {reply.question && (reply.source === 'location' || canAsk) && <Button compact secondary label="Check again" icon="refresh-outline" disabled={busy || starting || stopping || !!typing} hint={reply.source === 'view' ? 'Takes a fresh camera image for the same question.' : 'Looks up your location again.'} onPress={() => void guide.checkAgain()} />}
