@@ -68,6 +68,7 @@ export function GuidanceProvider({ children }: { children: ReactNode }) {
   const listeningRef = useRef(false)
   const handsFreeRef = useRef(false)
   const speakingRef = useRef(false)
+  const pendingAnnouncement = useRef<{ text: string; id: string } | undefined>(undefined)
   const speechId = useRef<string | undefined>(undefined)
   const speechCounter = useRef(0)
   const processingRequest = useRef<string | undefined>(undefined)
@@ -133,7 +134,9 @@ export function GuidanceProvider({ children }: { children: ReactNode }) {
     setStatusMessage(message)
   }
 
-  async function speak(text: string, urgent = false) {
+  async function speak(text: string, kind: 'guidance' | 'reply' | 'urgent' = 'guidance') {
+    const urgent = kind === 'urgent'
+    const useAppVoice = kind === 'reply' && handsFreeRef.current
     const epoch = cameraEpoch.current
     const utteranceId = `neardar-speech-${++speechCounter.current}`
     speechId.current = utteranceId
@@ -143,9 +146,21 @@ export function GuidanceProvider({ children }: { children: ReactNode }) {
     if (epoch !== cameraEpoch.current || speechId.current !== utteranceId) return
     listeningRef.current = false
     setListening(false)
+    if (Platform.OS === 'ios' && !useAppVoice) {
+      const voiceOver = await AccessibilityInfo.isScreenReaderEnabled().catch(() => false)
+      if (epoch !== cameraEpoch.current || speechId.current !== utteranceId) return
+      if (voiceOver) {
+        await Voice.stopSpeaking().catch(() => {})
+        if (epoch !== cameraEpoch.current || speechId.current !== utteranceId) return
+        pendingAnnouncement.current = { text, id: utteranceId }
+        AccessibilityInfo.announceForAccessibilityWithOptions(text, { queue: !urgent })
+        return
+      }
+    }
     try {
       await Voice.speak(text, {
         utteranceId,
+        voiceIdentifier: settingsRef.current.voiceIdentifier,
         rate: settingsRef.current.speechRate,
         priority: urgent ? 'urgent' : 'answer',
         interrupt: true,
@@ -157,7 +172,7 @@ export function GuidanceProvider({ children }: { children: ReactNode }) {
       speakingRef.current = false
       setSpeaking(false)
       setVoiceNotice(error instanceof Error ? error.message : 'Speech is unavailable on this device.')
-      if (Platform.OS === 'ios') AccessibilityInfo.announceForAccessibilityWithOptions(text, { queue: !urgent })
+      if (Platform.OS === 'ios' && !useAppVoice) AccessibilityInfo.announceForAccessibilityWithOptions(text, { queue: !urgent })
       await resumeListening()
     }
   }
@@ -203,7 +218,7 @@ export function GuidanceProvider({ children }: { children: ReactNode }) {
     if (settingsRef.current.urgentHaptics && (warning.severity !== 'info' || warning.kind === 'sensor')) {
       void Haptics.play({ direction: warning.kind === 'sensor' ? 'unknown' : warning.direction || 'ahead', severity: warning.severity, distanceMeters: warning.distanceMeters }).catch(() => {})
     }
-    await speak(warning.message, warning.severity === 'urgent')
+    await speak(warning.message, warning.severity === 'urgent' ? 'urgent' : 'guidance')
   }
 
   async function start(handsFree = settingsRef.current.continuousListening) {
@@ -248,8 +263,7 @@ export function GuidanceProvider({ children }: { children: ReactNode }) {
       depthExpected.current = startedCapabilities.depth
       updateState(depthExpected.current ? 'active' : 'degraded', depthExpected.current ? 'Point the camera at what you want to inspect.' : 'Camera is on. Depth measurements are unavailable.')
       void visual.prepare(false)
-      const opening = handsFreeRef.current ? 'Hands-free is on. Try asking what’s on my left. Say stop camera to finish.' : 'Camera on.'
-      await speak(depthExpected.current ? opening : `${opening} Distance and obstacle alerts are unavailable.`)
+      await resumeListening()
     } catch (error) {
       await Promise.allSettled([Perception.stopSession(), deactivateKeepAwake('guidance')])
       if (epoch !== cameraEpoch.current) return
@@ -307,7 +321,7 @@ export function GuidanceProvider({ children }: { children: ReactNode }) {
       return
     }
     if (intent.kind === 'voice-help') {
-      await speak('Try find a seat, find the checkout, or help me find baked beans. Say check the label to verify a product, check again for a fresh view, or stop camera to finish.')
+      await speak('Try find a seat, find the checkout, or help me find baked beans. Say check the label to verify a product, check again for a fresh view, or stop camera to finish.', 'reply')
       return
     }
     if (intent.kind === 'repeat') {
@@ -420,7 +434,7 @@ export function GuidanceProvider({ children }: { children: ReactNode }) {
   async function deliverReply(reply: GuidanceReply) {
     replyRef.current = reply
     setLastReply(reply)
-    await speak(reply.text)
+    await speak(reply.text, 'reply')
   }
   async function sayLocation(question: string) {
     if (processingRequest.current || locationRequest.current || starting.current || pausing.current) return
@@ -515,15 +529,15 @@ export function GuidanceProvider({ children }: { children: ReactNode }) {
 
   async function repeat() {
     const reply = replyRef.current
-    if (!reply) await speak('There is no answer to repeat yet.')
-    else if (reply.source === 'view') await speak(`From the previous view. ${reply.text.replace(/^From the captured view\. /, '')}`)
-    else await speak(reply.source === 'location' ? `From your last location check. ${reply.text}` : reply.text)
+    if (!reply) await speak('There is no answer to repeat yet.', 'reply')
+    else if (reply.source === 'view') await speak(`From the previous view. ${reply.text.replace(/^From the captured view\. /, '')}`, 'reply')
+    else await speak(reply.source === 'location' ? `From your last location check. ${reply.text}` : reply.text, 'reply')
   }
 
   async function checkAgain() {
     const reply = replyRef.current
-    if (!reply?.question) await speak('Ask a question first, then you can say check again.')
-    else if (reply.source === 'view' && stateRef.current !== 'active' && stateRef.current !== 'degraded') await speak('Start the camera to check the view again.')
+    if (!reply?.question) await speak('Ask a question first, then you can say check again.', 'reply')
+    else if (reply.source === 'view' && stateRef.current !== 'active' && stateRef.current !== 'degraded') await speak('Start the camera to check the view again.', 'reply')
     else await processQuestion(reply.question, reply.errand)
   }
 
@@ -587,6 +601,21 @@ export function GuidanceProvider({ children }: { children: ReactNode }) {
       if (event.type === 'lifecycle' && event.foreground === false && !voicePermissionPending.current && !locationPermissionPending.current && (locationRequest.current || stateRef.current === 'active' || stateRef.current === 'degraded')) void pause(true)
       if (event.message) setStatusMessage(event.message)
     })
+    function finishAnnouncement(text?: string) {
+      const pending = pendingAnnouncement.current
+      if (!pending || pending.id !== speechId.current || (text !== undefined && pending.text !== text)) return
+      pendingAnnouncement.current = undefined
+      speechId.current = undefined
+      speakingRef.current = false
+      setSpeaking(false)
+      void resumeListeningRef.current()
+    }
+    const announcements = Platform.OS === 'ios' ? AccessibilityInfo.addEventListener(
+      'announcementFinished', ({ announcement }) => finishAnnouncement(announcement)
+    ) : undefined
+    const screenReaderChanges = Platform.OS === 'ios' ? AccessibilityInfo.addEventListener(
+      'screenReaderChanged', enabled => { if (!enabled) finishAnnouncement() }
+    ) : undefined
     const voiceEvents = Voice.addVoiceListener((event: Voice.VoiceEvent) => {
       if (event.type === 'final' && event.text && !textEntry.current && !pausing.current && !processingRequest.current && (stateRef.current === 'active' || stateRef.current === 'degraded')) transcriptAction.current(event.text)
       if (event.type === 'listeningStopped') {
@@ -624,6 +653,8 @@ export function GuidanceProvider({ children }: { children: ReactNode }) {
       locationRequest.current?.abort()
       perceptionEvents.remove()
       voiceEvents.remove()
+      announcements?.remove()
+      screenReaderChanges?.remove()
       void Promise.allSettled([Perception.stopSession(), Voice.stopListening(), Voice.stopSpeaking(), Haptics.stop()])
     }
     // Subscribe once; handlers read changing settings and session state through refs.

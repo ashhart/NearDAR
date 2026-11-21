@@ -114,7 +114,7 @@ export default function Guide() {
 
     <View style={[styles.welcome, { backgroundColor: colors.raised }]}>
       <View style={styles.statusRow}>
-        <Signal live tone={active ? 'ready' : 'quiet'}>{cameraStatus}</Signal>
+        <Signal live={Platform.OS !== 'ios'} tone={active ? 'ready' : 'quiet'}>{cameraStatus}</Signal>
         {active && output && <View style={styles.output}><Icon name={guide.voice?.route === 'headphones' ? 'headset-outline' : 'volume-medium-outline'} color={colors.muted} size={18} /><Text style={[styles.outputText, { color: colors.muted }]}>{output}</Text></View>}
       </View>
       <Heading editorial focusOnEntry>{active ? 'How can I help?' : settings.companionName ? `Hello, ${settings.companionName}` : 'Explore nearby'}</Heading>
@@ -124,7 +124,7 @@ export default function Guide() {
       {!busy && guide.voiceModelMissing && Platform.OS === 'android' && Platform.Version >= 34 &&
         <Button secondary label="Download offline speech" icon="download-outline" hint="Uses an internet connection once to prepare voice input." busy={guide.speechDownloadPending} onPress={() => void guide.downloadOfflineSpeech()} />}
 
-      {phase && <Text aria-live="polite" style={[styles.phase, { color: colors.text }]}>{phase}</Text>}
+      {phase && <Text aria-live={Platform.OS === 'ios' ? undefined : 'polite'} style={[styles.phase, { color: colors.text }]}>{phase}</Text>}
       {busy ? <Button secondary label="Cancel question" icon="close-outline" onPress={() => void guide.stopSpeech()} /> : !active ? <>
         {voiceInput && <Button label="Start hands-free" icon="mic-outline" hint="Turns on the camera. The microphone listens again after each reply." busy={guide.startPending || stopping} onPress={() => startCamera(true)} />}
         <Button
@@ -174,7 +174,7 @@ export default function Guide() {
 
     {reply && <StatusCard title="Last answer">
       {reply.question && <Body muted>You asked “{reply.question}”</Body>}
-      <Text aria-live={guide.voice?.offlineSpeech ? undefined : 'polite'} style={[styles.answer, { color: colors.text }]}>{reply.text}</Text>
+      <Text aria-live={Platform.OS !== 'ios' && !guide.voice?.offlineSpeech ? 'polite' : undefined} style={[styles.answer, { color: colors.text }]}>{reply.text}</Text>
       {reply.detail && <Body muted>{reply.detail}</Body>}
       <View style={styles.actions}>
         {reply.question && (reply.source === 'location' || canAsk) && <Button compact secondary label="Check again" icon="refresh-outline" disabled={busy || starting || stopping || !!typing} hint={reply.source === 'view' ? 'Takes a fresh camera image for the same question.' : 'Looks up your location again.'} onPress={() => void guide.checkAgain()} />}
