@@ -29,6 +29,9 @@ enum VoiceCatalog {
     guard !requestedLocale.isEmpty else {
       throw VoiceFailure(operation: "speak", code: "E_UNAVAILABLE_LOCALE", message: "No speech locale is available on this device.")
     }
+    if let systemVoice = AVSpeechSynthesisVoice(language: locale ?? AVSpeechSynthesisVoice.currentLanguageCode()) {
+      return systemVoice
+    }
     let exact = voices.first { normalizeLocale($0.language) == requestedLocale }
     let languageOnly = !requestedLocale.contains("-")
       ? voices.first { normalizeLocale($0.language).split(separator: "-").first.map(String.init) == requestedLocale }
@@ -93,6 +96,9 @@ extension VoiceController {
       "available": onDeviceRecognition && offlineSpeech,
       "onDeviceRecognition": onDeviceRecognition,
       "offlineSpeech": offlineSpeech,
+      "installedVoices": AVSpeechSynthesisVoice.speechVoices().sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }.map {
+        ["id": $0.identifier, "name": $0.name, "language": $0.language]
+      },
       "route": VoiceAudio.currentRouteKind(),
       "reason": voiceNull(reason)
     ]

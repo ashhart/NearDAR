@@ -26,14 +26,14 @@ export default function Setup() {
       if (!mounted.current || enabled) return
       started = true
       return Voice.speak('Welcome to NearDAR. Download offline descriptions, then choose Start hands-free to ask about what’s nearby. You can say stop camera at any time while it’s listening.', {
-        rate: settings.speechRate, priority: 'answer', interrupt: true, speakerFallback: settings.speakerFallback,
+        voiceIdentifier: settings.voiceIdentifier, rate: settings.speechRate, priority: 'answer', interrupt: true, speakerFallback: settings.speakerFallback,
       })
     }).catch(() => {})
     return () => {
       mounted.current = false
       if (started) void Voice.stopSpeaking().catch(() => {})
     }
-  }, [settings.speechRate, settings.speakerFallback])
+  }, [settings.speechRate, settings.speakerFallback, settings.voiceIdentifier])
 
   async function finish() {
     if (leaving.current || !mounted.current) return
