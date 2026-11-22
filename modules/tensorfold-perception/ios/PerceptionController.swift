@@ -442,15 +442,19 @@ final class PerceptionController: NSObject, ARSessionDelegate {
     emit?("onStatus", status(snapshot))
     if snapshot["depthState"] as? String == "available", isNormalTracking(frame.camera.trackingState) {
       let obstacles = (snapshot["obstacles"] as? [[String: Any]] ?? []).filter { ($0["nearestDistanceMeters"] as? Double ?? .infinity) <= settings.warningDistance }
-      for obstacle in obstacles {
-        let distance = obstacle["nearestDistanceMeters"] as? Double ?? .infinity
-        let warning: [String: Any] = [
-          "timestampMs": frameClock.unixMilliseconds(for: frame.timestamp), "snapshotId": snapshot["id"] as? String ?? UUID().uuidString,
+      if let obstacle = obstacles.min(by: { ($0["nearestDistanceMeters"] as? Double ?? .infinity) < ($1["nearestDistanceMeters"] as? Double ?? .infinity) }),
+        let distance = obstacle["nearestDistanceMeters"] as? Double {
+        var warning: [String: Any] = [
+          "timestampMs": frameClock.unixMilliseconds(for: frame.timestamp),
           "severity": distance <= settings.criticalDistance ? "critical" : "warning",
           "sector": obstacle["sector"] as? String ?? "unknown", "direction": obstacle["direction"] as? [String: Any] ?? [:],
           "distanceMeters": distance, "robustDistanceMeters": obstacle["robustDistanceMeters"] as? Double ?? distance,
           "confidence": obstacle["meanConfidence"] as? Double ?? 0, "obstacle": obstacle
         ]
+        if let objects = snapshot["objects"] as? [[String: Any]],
+          let label = LiveObstacleIdentity.label(obstacle: obstacle, objects: objects) {
+          warning["label"] = label
+        }
         emit?("onWarning", warning)
       }
     }

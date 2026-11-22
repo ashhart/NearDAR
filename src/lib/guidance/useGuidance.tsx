@@ -8,7 +8,8 @@ import * as Voice from '../../../modules/tensorfold-voice/src'
 import * as Vision from '../../../modules/tensorfold-vision/src'
 import * as Haptics from '../../../modules/tensorfold-haptics/src'
 import { useAppSettings } from '../SettingsContext'
-import { WarningGate } from './alerts'
+import { WarningGate, warningIsCurrent } from './alerts'
+import { headphonesDisconnected, microphoneRetryNotice, voiceErrorCode } from './voiceFeedback'
 import { parseIntent } from './intents'
 import { answerAhead, answerMeasuredAhead, answerQuestion, answerText, buildGenerationRequest, cameraRecoveryHint, requestedObject, requestedSide, seatAlignmentTarget, sensorLimit, validatedGeneratedAnswer } from './scene'
 import { answerErrand, errandHasLabel, findErrand, shoppingCommand, type Errand, type ShoppingCommand } from './errands'
@@ -149,16 +150,23 @@ export function GuidanceProvider({ children }: { children: ReactNode }) {
       }
     } catch (error) {
       if (mounted.current && epoch === cameraEpoch.current && !textEntry.current && !voiceRetryBlocked.current) {
-        voiceRetryBlocked.current = true
-        listeningRef.current = false
-        setListening(false)
-        setSessionMode(false)
-        setVoiceNotice(error instanceof Error ? error.message : 'On-device voice input couldn’t start.')
+        failVoiceInput(voiceErrorCode(error), error instanceof Error ? error.message : 'On-device voice input couldn’t start.')
       }
     }
     const foreground = await waitForPostPermissionForeground()
     voicePermissionPending.current = false
     if (!foreground && epoch === cameraEpoch.current) await pause(true)
+  }
+
+  function failVoiceInput(code: string | undefined, message: string) {
+    if (voiceRetryBlocked.current) return
+    voiceRetryBlocked.current = true
+    listeningRef.current = false
+    setListening(false)
+    setSessionMode(false)
+    const retry = microphoneRetryNotice(code)
+    setVoiceNotice(retry ?? message)
+    if (retry && Platform.OS === 'ios') announce(retry)
   }
 
   function setSessionMode(enabled: boolean) {
@@ -207,9 +215,22 @@ export function GuidanceProvider({ children }: { children: ReactNode }) {
       speechId.current = undefined
       speakingRef.current = false
       setSpeaking(false)
-      setVoiceNotice(error instanceof Error ? error.message : 'Speech is unavailable on this device.')
-      if (Platform.OS === 'ios') AccessibilityInfo.announceForAccessibilityWithOptions(text, { queue: !urgent })
-      await resumeListening()
+      const code = voiceErrorCode(error)
+      const routeBlocked = code === 'E_AUDIO_ROUTE'
+      if (Platform.OS === 'ios' && !routeBlocked) announce(text, !urgent)
+      if (Platform.OS === 'ios' && code === 'E_AUDIO_SESSION') {
+        voiceRetryBlocked.current = true
+        setSessionMode(false)
+        const message = 'NearDAR couldn’t play its voice. Your answer stays in Last answer. Choose Ask by voice to try again, or type your question.'
+        setVoiceNotice(message)
+        announce(message)
+      } else {
+        setVoiceNotice(error instanceof Error ? error.message : 'Speech is unavailable on this device.')
+        if (routeBlocked) {
+          voiceRetryBlocked.current = true
+          setSessionMode(false)
+        } else await resumeListening()
+      }
     }
   }
 
@@ -254,11 +275,12 @@ export function GuidanceProvider({ children }: { children: ReactNode }) {
 
   async function handleWarning(warning: SceneWarning) {
     const running = stateRef.current === 'active' || stateRef.current === 'degraded'
-    if (!running || pausing.current || !gate.current.accept(warning)) return
+    if (!running || pausing.current || !warningIsCurrent(warning)) return
+    setWarning(warning)
+    if (!gate.current.accept(warning)) return
     if (activeAlignment.current && warning.severity === 'urgent') {
       void cancelAlignment('Alignment stopped. Check the nearby obstacle.')
     }
-    setWarning(warning)
     setStatusMessage(warning.message)
     if (settingsRef.current.urgentHaptics && (warning.severity !== 'info' || warning.kind === 'sensor')) {
       void Haptics.play({ direction: warning.kind === 'sensor' ? 'unknown' : warning.direction || 'ahead', severity: warning.severity, distanceMeters: warning.distanceMeters }).catch(() => {})
@@ -746,7 +768,7 @@ export function GuidanceProvider({ children }: { children: ReactNode }) {
       }
       if (event.type === 'routeChanged' && event.route) {
         setVoice((current) => current ? { ...current, route: event.route! } : current)
-        if (previousRoute.current === 'headphones' && event.route !== 'headphones') {
+        if (headphonesDisconnected(Platform.OS, previousRoute.current, event.route, event.audioRoute)) {
           if (settingsRef.current.speakerFallback && event.route === 'speaker') void speak('Headphones disconnected. Using the phone speaker.')
           else void pause(true).then(() => settingsRef.current.speakerFallback ? speak('Headphones disconnected. Guidance paused.') : undefined)
         }
@@ -754,9 +776,11 @@ export function GuidanceProvider({ children }: { children: ReactNode }) {
       }
       if (event.type === 'error' && event.message && !silenceCodes.has(event.code ?? '') && !pausing.current) {
         if (event.operation === 'recognition' || event.operation === 'startListening') {
-          voiceRetryBlocked.current = true
-          setSessionMode(false)
+          if (event.code === 'ERR_RECOGNITION_MODEL_MISSING') setVoiceModelMissing(true)
+          failVoiceInput(event.code, event.message)
+          return
         }
+        if (event.operation === 'speak') return
         if (event.code === 'ERR_RECOGNITION_MODEL_MISSING') setVoiceModelMissing(true)
         setVoiceNotice(event.message)
       }

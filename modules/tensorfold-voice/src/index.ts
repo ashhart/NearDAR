@@ -60,6 +60,7 @@ export interface AudioRoutePort {
 
 export interface AudioRouteSnapshot {
   reason: string;
+  previousOutput?: AudioRoute;
   inputs: AudioRoutePort[];
   outputs: AudioRoutePort[];
   bluetoothMicrophoneAvailable: boolean;

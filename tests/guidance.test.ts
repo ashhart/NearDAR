@@ -279,3 +279,41 @@ describe('warning repetition', () => {
     expect(gate.accept({ ...warning, observedAt: now - 10_000 }, now + 200)).toBe(false)
   })
 })
+
+describe('live obstacle changes', () => {
+  const first: SceneWarning = {
+    id: 'ios-live-obstacle', kind: 'obstacle', severity: 'caution', direction: 'ahead',
+    message: 'Obstacle ahead, about one metre.', observedAt: 10_000, distanceMeters: 1,
+  }
+
+  test('quiets a stationary obstacle, then speaks a reliable name once', () => {
+    const gate = new WarningGate()
+    expect(gate.accept(first, first.observedAt)).toBe(true)
+    for (let observedAt = 10_350; observedAt <= 30_000; observedAt += 350) {
+      expect(gate.accept({ ...first, observedAt }, observedAt)).toBe(false)
+    }
+    const named = { ...first, observedAt: 30_000, label: 'wall' }
+    expect(gate.accept(named, named.observedAt)).toBe(true)
+    expect(gate.accept({ ...first, observedAt: 30_200 }, 30_200)).toBe(false)
+    expect(gate.accept({ ...named, observedAt: 30_400 }, 30_400)).toBe(false)
+  })
+
+  test('reports escalation, a meaningful approach, direction changes and a returning obstacle', () => {
+    const gate = new WarningGate()
+    expect(gate.accept(first, first.observedAt)).toBe(true)
+    const urgent = { ...first, severity: 'urgent', observedAt: 10_350 } as const
+    expect(gate.accept(urgent, 10_350)).toBe(true)
+    expect(gate.accept({ ...urgent, distanceMeters: 0.93, observedAt: 10_700 }, 10_700)).toBe(false)
+    expect(gate.accept({ ...urgent, distanceMeters: 0.6, observedAt: 11_000 }, 11_000)).toBe(true)
+    const left = { ...urgent, direction: 'ahead-left', distanceMeters: 0.6, observedAt: 11_200 } as const
+    expect(gate.accept(left, 11_200)).toBe(true)
+    expect(gate.accept({ ...left, observedAt: 11_100 }, 11_300)).toBe(false)
+    expect(gate.accept({ ...left, observedAt: 13_500 }, 13_500)).toBe(true)
+  })
+
+  test('ignores new per-frame IDs when depth observations are unchanged', () => {
+    const gate = new WarningGate()
+    expect(gate.accept({ ...first, id: 'snapshot-1' }, first.observedAt)).toBe(true)
+    expect(gate.accept({ ...first, id: 'snapshot-2', observedAt: 10_300 }, 10_300)).toBe(false)
+  })
+})

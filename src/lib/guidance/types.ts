@@ -23,6 +23,7 @@ export interface SeatCandidate extends SceneObject {
 
 export interface SceneWarning {
   id: string
+  label?: string
   kind: 'obstacle' | 'step-up' | 'step-down' | 'drop-off' | 'sensor'
   severity: 'info' | 'caution' | 'urgent'
   message: string

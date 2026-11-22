@@ -8,7 +8,32 @@ struct PerceptionTests {
     checkProjection()
     checkDepthBuffers()
     checkAlignmentDwell()
-    print("iOS perception checks passed: timestamps, portrait projection, depth buffers, and alignment dwell.")
+    checkLiveObstacleIdentity()
+    print("iOS perception checks passed: timestamps, portrait projection, depth buffers, alignment dwell, and obstacle identity.")
+  }
+
+  static func checkLiveObstacleIdentity() {
+    let sector = ["x": 0.4, "y": 0.4, "width": 0.2, "height": 0.2]
+    let obstacle: [String: Any] = [
+      "bounds": sector, "nearestDistanceMeters": 1.0, "spreadMeters": 0.12, "meanConfidence": 0.9
+    ]
+    let wall: [String: Any] = [
+      "source": "arkit-mesh-classification", "label": "wall", "bounds": sector,
+      "center": ["z": 1.08], "confidence": 0.82
+    ]
+    expect(LiveObstacleIdentity.label(obstacle: obstacle, objects: [wall]) == "wall", "A reliable mesh at the measured obstacle can supply its label")
+    var other = wall
+    other["center"] = ["z": 1.6]
+    expect(LiveObstacleIdentity.label(obstacle: obstacle, objects: [other]) == nil, "A mesh behind the measured obstacle must not supply its label")
+    other = wall
+    other["bounds"] = ["x": 0.82, "y": 0.4, "width": 0.15, "height": 0.2]
+    expect(LiveObstacleIdentity.label(obstacle: obstacle, objects: [other]) == nil, "A mesh in another sector must not supply its label")
+    other = wall
+    other["label"] = "door"
+    expect(LiveObstacleIdentity.label(obstacle: obstacle, objects: [wall, other]) == nil, "Competing labels must fall back to an unnamed warning")
+    other = wall
+    other["confidence"] = 0.5
+    expect(LiveObstacleIdentity.label(obstacle: obstacle, objects: [other]) == nil, "A low-confidence mesh must not supply a label")
   }
 
   static func checkProjection() {

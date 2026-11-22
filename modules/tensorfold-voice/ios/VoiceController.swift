@@ -130,10 +130,14 @@ final class VoiceController: NSObject, AVSpeechSynthesizerDelegate, SFSpeechReco
     guard let raw = notification.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt,
       let reason = AVAudioSession.RouteChangeReason(rawValue: raw) else { return }
     let name = VoiceAudio.routeReason(reason)
+    var audioRoute = VoiceAudio.routePayload(reason: name)
+    if let previous = notification.userInfo?[AVAudioSessionRouteChangePreviousRouteKey] as? AVAudioSessionRouteDescription {
+      audioRoute["previousOutput"] = VoiceAudio.routeKind(previous)
+    }
     emit(VoiceEvent.voiceEvent, [
       "type": "routeChanged",
       "route": VoiceAudio.currentRouteKind(),
-      "audioRoute": VoiceAudio.routePayload(reason: name),
+      "audioRoute": audioRoute,
       "timestamp": voiceTimestamp()
     ])
     if reason == .oldDeviceUnavailable {
