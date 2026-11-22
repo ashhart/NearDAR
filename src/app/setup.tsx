@@ -25,7 +25,7 @@ export default function Setup() {
     void AccessibilityInfo.isScreenReaderEnabled().then((enabled) => {
       if (!mounted.current || enabled) return
       started = true
-      return Voice.speak('Welcome to NearDAR. Download offline descriptions, then choose Start hands-free to ask about what’s nearby. You can say stop camera at any time while it’s listening.', {
+      return Voice.speak('Point your camera. Download offline descriptions to recognise nearby objects and look for seats. Choose Start hands-free to ask a question using your voice. Say stop camera to finish. NearDAR can miss hazards. Use it alongside your cane, guide dog, and orientation and mobility training.', {
         voiceIdentifier: settings.voiceIdentifier, rate: settings.speechRate, priority: 'answer', interrupt: true, speakerFallback: settings.speakerFallback,
       })
     }).catch(() => {})
@@ -35,12 +35,12 @@ export default function Setup() {
     }
   }, [settings.speechRate, settings.speakerFallback, settings.voiceIdentifier])
 
-  async function finish() {
+  async function finish(downloadReady = false) {
     if (leaving.current || !mounted.current) return
     leaving.current = true
     setContinuing(true)
     await update({ onboardingComplete: true }).catch(() => {})
-    if (mounted.current) router.replace('/guide')
+    if (mounted.current) router.replace({ pathname: '/guide', params: { setup: downloadReady ? 'downloaded' : 'complete' } })
   }
 
   const continueLabel = waitingForDownload ? 'Open NearDAR while preparing' : vision?.available && !hasDownload ? 'Continue without download' : 'Continue to NearDAR'
@@ -48,8 +48,8 @@ export default function Setup() {
   return <Screen footer={<Button label={continueLabel} secondary={!!vision?.available && !hasDownload} icon="arrow-forward" hint="Choose Start hands-free or Start camera on the next screen." busy={continuing} onPress={() => void finish()} />}>
     <TopBar />
     <View style={styles.intro}>
-      <Heading editorial focusOnEntry>Hear what’s around you.</Heading>
-      <Body muted>Point your iPhone or Android camera and ask what’s nearby. Look for a seat, find an object, or read text aloud.</Body>
+      <Heading editorial focusOnEntry>Point your camera.</Heading>
+      <Body muted>Ask what’s nearby, look for a seat, find an object, or read text aloud.</Body>
     </View>
     {fontScale < 1.5 && <Image
       source={require('../../assets/neardar-welcome.jpg')}
@@ -60,8 +60,8 @@ export default function Setup() {
       resizeMode="cover"
       style={[styles.photo, { height: photoHeight, backgroundColor: colors.raised }]}
     />}
-    <VisionModelCard onReady={() => void finish()} />
-    <Body muted>Keep using your usual mobility aid. NearDAR can miss hazards.</Body>
+    <VisionModelCard onReady={() => void finish(true)} />
+    <Body muted>NearDAR can miss hazards. Use it alongside your cane, guide dog, and orientation and mobility training.</Body>
   </Screen>
 }
 

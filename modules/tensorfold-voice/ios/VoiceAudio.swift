@@ -4,27 +4,30 @@ import Foundation
 enum VoiceAudio {
   static func activate(operation: String, recognition: Bool, preferBluetoothMicrophone: Bool, speakerFallback: Bool = true) throws {
     let session = AVAudioSession.sharedInstance()
+    var step = "configuring audio"
     do {
-      var options: AVAudioSession.CategoryOptions = [.allowBluetoothHFP, .allowBluetoothA2DP, .duckOthers]
-      if !recognition && speakerFallback { options.insert(.defaultToSpeaker) }
-      try session.setCategory(
-        .playAndRecord,
-        mode: recognition ? .voiceChat : .spokenAudio,
-        options: options
-      )
-      if recognition && preferBluetoothMicrophone,
-        let input = bluetoothInput(in: session.availableInputs) {
-        try session.setPreferredInput(input)
+      if recognition {
+        try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.allowBluetoothHFP, .duckOthers])
       } else {
-        try session.setPreferredInput(nil)
+        try session.setCategory(.playback, mode: .spokenAudio, options: [.duckOthers])
       }
+      step = "activating audio"
       try session.setActive(true)
+      if recognition {
+        step = "selecting a microphone"
+        let input = preferBluetoothMicrophone ? bluetoothInput(in: session.availableInputs) : nil
+        if input?.uid != session.preferredInput?.uid { try session.setPreferredInput(input) }
+      }
     } catch {
-      throw VoiceFailure(
-        operation: operation,
-        code: "E_AUDIO_SESSION",
-        message: "Could not activate the microphone and headset audio route: \(error.localizedDescription)"
-      )
+      deactivate()
+      let systemError = error as NSError
+      throw VoiceFailure(operation: operation, code: "E_AUDIO_SESSION",
+        message: "Error while \(step) (\(systemError.domain), \(systemError.code)).")
+    }
+    if !recognition && !speakerFallback && currentRouteKind() == "speaker" {
+      deactivate()
+      throw VoiceFailure(operation: operation, code: "E_AUDIO_ROUTE",
+        message: "Connect headphones to hear NearDAR, or enable the phone speaker in Settings.")
     }
   }
 
@@ -33,7 +36,11 @@ enum VoiceAudio {
   }
 
   static func currentRouteKind() -> String {
-    let outputs = AVAudioSession.sharedInstance().currentRoute.outputs
+    routeKind(AVAudioSession.sharedInstance().currentRoute)
+  }
+
+  static func routeKind(_ route: AVAudioSessionRouteDescription) -> String {
+    let outputs = route.outputs
     if outputs.contains(where: { [.headphones, .bluetoothHFP, .bluetoothLE, .bluetoothA2DP].contains($0.portType) }) {
       return "headphones"
     }

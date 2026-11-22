@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { WarningGate } from '../src/lib/guidance/alerts'
 import { parseIntent } from '../src/lib/guidance/intents'
-import { answerAhead, answerQuestion, answerSeats, objectPhrase, validatedGeneratedAnswer } from '../src/lib/guidance/scene'
+import { answerAhead, answerMeasuredAhead, answerQuestion, answerSeats, cameraRecoveryHint, objectPhrase, seatAlignmentTarget, validatedGeneratedAnswer } from '../src/lib/guidance/scene'
 import { mergeVisionEvidence } from '../src/lib/guidance/vision'
 import type { SceneObject, SceneSnapshot, SceneWarning } from '../src/lib/guidance/types'
 
@@ -20,6 +20,8 @@ describe('voice commands', () => {
     expect(parseIntent('Stop listening')).toEqual({ kind: 'stop-listening' })
     expect(parseIntent('Stop camera')).toEqual({ kind: 'stop-session' })
     expect(parseIntent('Check again')).toEqual({ kind: 'check-again' })
+    expect(parseIntent('Align to the seat.')).toEqual({ kind: 'align-seat' })
+    expect(parseIntent('Stop alignment')).toEqual({ kind: 'stop-alignment' })
     expect(parseIntent('What can I ask?')).toEqual({ kind: 'voice-help' })
     expect(parseIntent('Look left')).toEqual({ kind: 'question', question: 'What is on my left?' })
     expect(parseIntent('Check to my right.')).toEqual({ kind: 'question', question: 'What is on my right?' })
@@ -36,6 +38,12 @@ describe('voice commands', () => {
 })
 
 describe('grounded scene speech', () => {
+  test('explains how to recover when camera tracking is slow or limited', () => {
+    expect(cameraRecoveryHint({ ...snapshot, notes: ['Tracking is limited by excessive motion.'] })).toContain('Hold the phone steady')
+    expect(cameraRecoveryHint({ ...snapshot, notes: ['Tracking needs more visible surface detail.'] })).toContain('well-lit object')
+    expect(cameraRecoveryHint(undefined)).toContain('Keep the lens uncovered')
+  })
+
   test('answers a typed question about one side using only objects on that side', () => {
     const leftObject: SceneObject = { ...lamppost, id: 'vision-left', label: 'chair', direction: 'ahead-left', distanceMeters: undefined, stepEstimate: undefined, evidence: ['on-device-vlm'] }
     const view = { ...snapshot, objects: [lamppost, leftObject] }
@@ -48,10 +56,35 @@ describe('grounded scene speech', () => {
     expect(answerAhead(snapshot)).toContain('lamppost to your right')
   })
 
+  test('answers immediately from recent measured depth without relying on appearance', () => {
+    const visualOnly: SceneObject = { ...lamppost, id: 'vision-8', label: 'chair', evidence: ['on-device-vlm'] }
+    const recent: SceneSnapshot = { ...snapshot, observedAt: 1_000, objects: [lamppost, visualOnly] }
+    expect(answerMeasuredAhead(recent, 1_250)).toBe('lamppost to your right, about 2 steps.')
+    expect(answerMeasuredAhead(recent, 1_751)).toBeUndefined()
+    expect(answerMeasuredAhead(recent, 999)).toBeUndefined()
+    expect(answerMeasuredAhead({ ...recent, trackingReady: false }, 1_250)).toBeUndefined()
+    expect(answerMeasuredAhead({ ...recent, depthState: 'limited' }, 1_250)).toBeUndefined()
+    expect(answerMeasuredAhead({ ...recent, objects: [visualOnly] }, 1_250)).toBeUndefined()
+  })
+
   test('does not invent a free seat or a clear scene', () => {
     expect(answerSeats(snapshot)).toContain('cannot confidently identify a free seat')
     expect(answerSeats(snapshot)).not.toContain('safe')
     expect(answerAhead({ ...snapshot, objects: [] })).toContain('cannot confidently name anything')
+  })
+
+  test('aligns only to the measured seat that the answer refers to', () => {
+    const left: SceneObject = { ...lamppost, id: 'mesh-left-seat', label: 'seat', direction: 'left' }
+    const right: SceneObject = { ...left, id: 'mesh-right-seat', direction: 'right' }
+    const captured = { ...snapshot, objects: [left, right] }
+    const merged = {
+      ...captured, objects: [left],
+      freeSeats: [{ ...right, id: `candidate-${right.id}`, free: true, evidence: ['on-device-vlm'] }],
+    }
+    expect(seatAlignmentTarget(merged, captured)).toEqual({ id: right.id, observedAt: captured.observedAt })
+    expect(seatAlignmentTarget({ ...merged, depthState: 'stale' }, captured)).toBeUndefined()
+    const visualOnly = { ...snapshot, objects: [{ ...left, id: 'vision-1' }] }
+    expect(seatAlignmentTarget(visualOnly, visualOnly)).toBeUndefined()
   })
 
   test('rejects unsupported evidence, invented measurements, and safe-path claims', () => {
@@ -244,5 +277,43 @@ describe('warning repetition', () => {
     expect(gate.accept(warning, now + 100)).toBe(false)
     expect(gate.accept({ ...warning, distanceMeters: 1 }, now + 100)).toBe(true)
     expect(gate.accept({ ...warning, observedAt: now - 10_000 }, now + 200)).toBe(false)
+  })
+})
+
+describe('live obstacle changes', () => {
+  const first: SceneWarning = {
+    id: 'ios-live-obstacle', kind: 'obstacle', severity: 'caution', direction: 'ahead',
+    message: 'Obstacle ahead, about one metre.', observedAt: 10_000, distanceMeters: 1,
+  }
+
+  test('quiets a stationary obstacle, then speaks a reliable name once', () => {
+    const gate = new WarningGate()
+    expect(gate.accept(first, first.observedAt)).toBe(true)
+    for (let observedAt = 10_350; observedAt <= 30_000; observedAt += 350) {
+      expect(gate.accept({ ...first, observedAt }, observedAt)).toBe(false)
+    }
+    const named = { ...first, observedAt: 30_000, label: 'wall' }
+    expect(gate.accept(named, named.observedAt)).toBe(true)
+    expect(gate.accept({ ...first, observedAt: 30_200 }, 30_200)).toBe(false)
+    expect(gate.accept({ ...named, observedAt: 30_400 }, 30_400)).toBe(false)
+  })
+
+  test('reports escalation, a meaningful approach, direction changes and a returning obstacle', () => {
+    const gate = new WarningGate()
+    expect(gate.accept(first, first.observedAt)).toBe(true)
+    const urgent = { ...first, severity: 'urgent', observedAt: 10_350 } as const
+    expect(gate.accept(urgent, 10_350)).toBe(true)
+    expect(gate.accept({ ...urgent, distanceMeters: 0.93, observedAt: 10_700 }, 10_700)).toBe(false)
+    expect(gate.accept({ ...urgent, distanceMeters: 0.6, observedAt: 11_000 }, 11_000)).toBe(true)
+    const left = { ...urgent, direction: 'ahead-left', distanceMeters: 0.6, observedAt: 11_200 } as const
+    expect(gate.accept(left, 11_200)).toBe(true)
+    expect(gate.accept({ ...left, observedAt: 11_100 }, 11_300)).toBe(false)
+    expect(gate.accept({ ...left, observedAt: 13_500 }, 13_500)).toBe(true)
+  })
+
+  test('ignores new per-frame IDs when depth observations are unchanged', () => {
+    const gate = new WarningGate()
+    expect(gate.accept({ ...first, id: 'snapshot-1' }, first.observedAt)).toBe(true)
+    expect(gate.accept({ ...first, id: 'snapshot-2', observedAt: 10_300 }, 10_300)).toBe(false)
   })
 })

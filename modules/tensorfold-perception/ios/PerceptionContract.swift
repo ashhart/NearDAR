@@ -109,14 +109,17 @@ enum PerceptionContract {
     if let steps = stepCount(obstacle) { measurement = "about \(Int(steps.rounded())) calibrated steps" }
     else if let distance { measurement = "about \(String(format: "%.1f", max(0.1, distance))) metres" }
     else { measurement = "distance unavailable" }
+    let label = native["label"] as? String
+    let name = label?.capitalized ?? "Obstacle"
     var result: [String: Any] = [
-      "id": "\(native["snapshotId"] as? String ?? UUID().uuidString)-\(native["sector"] as? String ?? "obstacle")",
+      "id": "ios-live-obstacle",
       "kind": "obstacle", "severity": native["severity"] as? String == "critical" ? "urgent" : "caution",
-      "message": "Obstacle \(heading.replacingOccurrences(of: "-", with: " ")), \(measurement).",
+      "message": "\(name) \(heading.replacingOccurrences(of: "-", with: " ")), \(measurement).",
       "observedAt": native["timestampMs"] as? Double ?? Date().timeIntervalSince1970 * 1000,
       "direction": heading
     ]
     if let distance { result["distanceMeters"] = distance }
+    if let label { result["label"] = label }
     return result
   }
 

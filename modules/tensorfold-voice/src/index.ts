@@ -60,6 +60,7 @@ export interface AudioRoutePort {
 
 export interface AudioRouteSnapshot {
   reason: string;
+  previousOutput?: AudioRoute;
   inputs: AudioRoutePort[];
   outputs: AudioRoutePort[];
   bluetoothMicrophoneAvailable: boolean;
@@ -68,7 +69,7 @@ export interface AudioRouteSnapshot {
 }
 
 export interface VoiceCapabilities {
-  installedVoices?: { id: string; name: string; language: string }[]
+  installedVoices?: { id: string; name: string; language: string }[];
   available: boolean;
   onDeviceRecognition: boolean;
   offlineSpeech: boolean;

@@ -97,16 +97,19 @@ export function useVisionModel() {
     }
   }
 
-  async function unload() {
-    if (operation.current || statusRef.current.state !== 'ready') return
-    paused.current = true
+  async function unload(pause = true): Promise<boolean> {
+    if (operation.current) await operation.current
     const previous = statusRef.current
+    if (previous.state !== 'ready') return previous.state !== 'unloading'
+    if (pause) paused.current = true
     update({ ...previous, state: 'unloading' })
     try {
       await Vision.unloadModel()
       update({ ...previous, state: 'installed', message: undefined })
+      return true
     } catch (error) {
-      update({ ...previous, state: 'error', message: error instanceof Error ? error.message : 'Could not unload the visual model.' })
+      update({ ...previous, message: error instanceof Error ? error.message : 'Could not unload the visual model.' })
+      return false
     }
   }
 

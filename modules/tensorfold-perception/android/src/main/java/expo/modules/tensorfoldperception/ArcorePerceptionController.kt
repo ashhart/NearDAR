@@ -343,7 +343,8 @@ class ArcorePerceptionController(
         val includeImage = captureOptions["includeImage"] as? Boolean ?: true
         if (includeImage) {
           val quality = (captureOptions["jpegQuality"] as? Number)?.toDouble() ?: 0.85
-          image = SceneImage.writeJPEG(activity, cameraImage, rotation, (quality * 100).toInt(), cameraTimestamp)
+          val maxImageLongEdge = (captureOptions["maxImageLongEdge"] as? Number)?.toInt()
+          image = SceneImage.writeJPEG(activity, cameraImage, rotation, (quality * 100).toInt(), cameraTimestamp, maxImageLongEdge)
         }
       }
       val snapshot = mutableMapOf<String, Any?>(
@@ -553,7 +554,8 @@ class ArcorePerceptionController(
       val includeImage = captureOptions["includeImage"] as? Boolean ?: true
       if (includeImage) {
         val quality = (captureOptions["jpegQuality"] as? Number)?.toDouble() ?: 0.85
-        image = SceneImage.writeJPEG(activity, cameraImage, rotation, (quality * 100).toInt(), cameraTimestamp!!)
+        val maxImageLongEdge = (captureOptions["maxImageLongEdge"] as? Number)?.toInt()
+        image = SceneImage.writeJPEG(activity, cameraImage, rotation, (quality * 100).toInt(), cameraTimestamp!!, maxImageLongEdge)
       }
     }
     val snapshot = mutableMapOf<String, Any?>(

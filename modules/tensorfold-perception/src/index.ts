@@ -27,10 +27,13 @@ export interface CaptureOptions {
   recognizeText?: boolean;
   detectPeople?: boolean;
   jpegQuality?: number;
+  /** Maximum long edge of the optional model JPEG. OCR and depth use the original frame. */
+  maxImageLongEdge?: number;
 }
 
 export interface PerceptionCapabilities {
   available: boolean;
+  cameraPreview?: boolean;
   depth: boolean;
   detector: boolean;
   ocr: boolean;
@@ -62,8 +65,11 @@ export interface SeatCandidate extends SceneObject {
   occupancyConfidence: number;
 }
 
+export type SeatAlignmentResult = 'aligned' | 'cancelled' | 'unavailable' | 'tracking-lost' | 'moved' | 'timed-out';
+
 export interface SceneWarning {
   id: string;
+  label?: string;
   kind: 'obstacle' | 'step-up' | 'step-down' | 'drop-off' | 'sensor';
   severity: 'info' | 'caution' | 'urgent';
   message: string;
@@ -119,6 +125,8 @@ type NativePerception = {
   stopSession(): Promise<void>;
   captureScene(options?: CaptureOptions): Promise<SceneSnapshot>;
   releaseCapture(uri: string): Promise<{ released: boolean }>;
+  alignToSeat?(id: string, observedAt: number): Promise<SeatAlignmentResult>;
+  cancelSeatAlignment?(): Promise<void>;
   addListener(eventName: string, listener: (event: PerceptionEvent) => void): void;
   removeListener(eventName: string, listener: (event: PerceptionEvent) => void): void;
 };
@@ -165,6 +173,14 @@ export function captureScene(options: CaptureOptions = {}): Promise<SceneSnapsho
 export function releaseCapture(uri: string): Promise<{ released: boolean }> {
   if (!uri) return Promise.reject(new Error('A capture URI is required.'));
   return native.releaseCapture(uri);
+}
+
+export function alignToSeat(id: string, observedAt: number): Promise<SeatAlignmentResult> {
+  return native.alignToSeat?.(id, observedAt) ?? Promise.resolve('unavailable');
+}
+
+export function cancelSeatAlignment(): Promise<void> {
+  return native.cancelSeatAlignment?.() ?? Promise.resolve();
 }
 
 export function addPerceptionListener(listener: (event: PerceptionEvent) => void): EventSubscription {

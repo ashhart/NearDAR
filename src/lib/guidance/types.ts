@@ -23,6 +23,7 @@ export interface SeatCandidate extends SceneObject {
 
 export interface SceneWarning {
   id: string
+  label?: string
   kind: 'obstacle' | 'step-up' | 'step-down' | 'drop-off' | 'sensor'
   severity: 'info' | 'caution' | 'urgent'
   message: string
@@ -92,6 +93,7 @@ export interface GuidanceReply {
   source?: 'view' | 'location'
   detail?: string
   errand?: Errand
+  seatTarget?: { id: string; observedAt: number }
 }
 
 export interface GuidanceController {
@@ -108,17 +110,19 @@ export interface GuidanceController {
   speechDownloadPending: boolean
   warning?: SceneWarning
   lastReply?: GuidanceReply
+  alignment?: { active: boolean; message: string }
   shoppingList: string[]
   snapshot?: SceneSnapshot
+  cameraReady: boolean
+  cameraHint?: string
+  cameraPreviewAvailable: boolean
   engine?: EngineCapabilities
   engineStatus: EngineStatus
   vision?: EngineCapabilities
   visionStatus: EngineStatus
   voice?: VoiceCapabilities
   installModel(): Promise<void>
-  loadModel(): Promise<void>
   cancelModelInstall(): Promise<void>
-  unloadModel(): Promise<void>
   prepareVisionModel(): Promise<boolean>
   cancelVisionInstall(): Promise<void>
   unloadVisionModel(): Promise<void>
@@ -132,5 +136,7 @@ export interface GuidanceController {
   repeat(): Promise<void>
   checkAgain(): Promise<void>
   checkLabel(): Promise<void>
+  alignToSeat(): Promise<void>
+  cancelAlignment(): Promise<void>
   stopSpeech(): Promise<void>
 }

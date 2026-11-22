@@ -16,6 +16,14 @@ interface HubEntry {
   lfs?: { oid?: string }
 }
 
+export function throwIfCancelled(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    const error = new Error('Conversation download cancelled.')
+    error.name = 'AbortError'
+    throw error
+  }
+}
+
 async function responseBytes(response: Response, path: string): Promise<Uint8Array> {
   if (!response.ok) throw new Error(`Could not download ${path}: HTTP ${response.status}.`)
   const announced = Number(response.headers.get('Content-Length') ?? 0)
@@ -32,7 +40,7 @@ async function revisionFiles(repository: string, revision: string, signal?: Abor
   let next: string | null = `${base}?recursive=true&expand=true`
   let pages = 0
   while (next) {
-    signal?.throwIfAborted()
+    throwIfCancelled(signal)
     pages += 1
     if (pages > 20) throw new Error('The model manifest has too many pages.')
     const response: Response = await fetch(next, { headers: { Accept: 'application/json' }, signal })
@@ -69,6 +77,7 @@ export async function createDefaultManifest(signal?: AbortSignal): Promise<Insta
   const repositoryUrl = defaultRepository.split('/').map(encodeURIComponent).join('/')
   const revisionUrl = encodeURIComponent(pinnedRevision)
   for (const entry of entries) {
+    throwIfCancelled(signal)
     const weight = /^model(?:-\d{5}-of-\d{5})?\.safetensors$/.test(entry.path)
     if (!weight && !metadataNames[entry.path]) continue
     const size = entry.size
@@ -85,6 +94,7 @@ export async function createDefaultManifest(signal?: AbortSignal): Promise<Insta
       files.push({ path: entry.path, url, size: bytes.length, sha256: sha256(bytes) })
     }
   }
+  throwIfCancelled(signal)
   if (!files.some(file => file.path === 'config.json')) throw new Error('The pinned checkpoint has no config.json.')
   if (!files.some(file => file.path === 'tokenizer.json' || file.path === 'tokenizer.model')) {
     throw new Error('The pinned checkpoint has no supported tokenizer.')

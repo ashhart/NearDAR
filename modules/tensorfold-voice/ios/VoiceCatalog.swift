@@ -29,7 +29,7 @@ enum VoiceCatalog {
     guard !requestedLocale.isEmpty else {
       throw VoiceFailure(operation: "speak", code: "E_UNAVAILABLE_LOCALE", message: "No speech locale is available on this device.")
     }
-    if let systemVoice = AVSpeechSynthesisVoice(language: locale ?? AVSpeechSynthesisVoice.currentLanguageCode()) {
+    if locale == nil, let systemVoice = AVSpeechSynthesisVoice(language: AVSpeechSynthesisVoice.currentLanguageCode()) {
       return systemVoice
     }
     let exact = voices.first { normalizeLocale($0.language) == requestedLocale }

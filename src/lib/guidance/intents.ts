@@ -5,6 +5,8 @@ export type GuidanceIntent =
   | { kind: 'voice-help' }
   | { kind: 'repeat' }
   | { kind: 'check-again' }
+  | { kind: 'align-seat' }
+  | { kind: 'stop-alignment' }
   | { kind: 'seat' }
   | { kind: 'ahead' }
   | { kind: 'read' }
@@ -22,6 +24,8 @@ export function parseIntent(text: string): GuidanceIntent {
   if (/^(stop|be quiet|quiet|stop talking|cancel)$/.test(value)) return { kind: 'stop-speech' }
   if (/^(repeat|say that again|repeat that)$/.test(value)) return { kind: 'repeat' }
   if (/^(check again|look again|check that again)$/.test(value)) return { kind: 'check-again' }
+  if (/^(align to (?:the |this )?seat|point me toward (?:the |this )?seat)$/.test(value)) return { kind: 'align-seat' }
+  if (/^(stop|cancel) (?:seat )?alignment$/.test(value)) return { kind: 'stop-alignment' }
   if (/^(where (?:am i|are we)|what(?:'s| is) my (?:current )?location|tell me where i am)$/.test(value)) return { kind: 'location' }
   const name = /^(?:call me|remember (?:that )?my name is)\s+(.+?)[.!?]*$/i.exec(text.trim())?.[1]?.trim()
   if (name) return { kind: 'remember-name', name }

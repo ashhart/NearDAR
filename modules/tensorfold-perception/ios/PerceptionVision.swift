@@ -6,6 +6,8 @@ import UIKit
 import Vision
 
 enum PerceptionVision {
+  private static let captureContext = CIContext(options: [.cacheIntermediates: false])
+
   static func interfaceOrientation() -> CGImagePropertyOrientation {
     let readOrientation = {
       let scene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
@@ -17,15 +19,6 @@ enum PerceptionVision {
       }
     }
     return Thread.isMainThread ? readOrientation() : DispatchQueue.main.sync(execute: readOrientation)
-  }
-
-  static func rotation(_ orientation: CGImagePropertyOrientation) -> Int {
-    switch orientation {
-    case .right: return 90
-    case .left: return 270
-    case .down: return 180
-    default: return 0
-    }
   }
 
   static func sensorBounds(_ observation: CGRect, orientation: CGImagePropertyOrientation) -> [String: Double] {
@@ -45,24 +38,22 @@ enum PerceptionVision {
     }
   }
 
-  static func people(frame: ARFrame, settings: PerceptionSettings) throws -> [[String: Any]] {
+  static func people(frame: ARFrame, orientation: CGImagePropertyOrientation, timestamp: Double, settings: PerceptionSettings) throws -> [[String: Any]] {
     let request = VNDetectHumanRectanglesRequest()
     request.upperBodyOnly = false
-    let orientation = interfaceOrientation()
     let handler = VNImageRequestHandler(cvPixelBuffer: frame.capturedImage, orientation: orientation, options: [:])
     try handler.perform([request])
     let observations = request.results ?? []
-    let timestamp = Geometry.timestamp(frame.timestamp)
     return observations.compactMap { observation in
       let bounds = sensorBounds(observation.boundingBox, orientation: orientation)
+      let center = Geometry.pointAt(nx: bounds["x"]! + bounds["width"]! / 2, ny: bounds["y"]! + bounds["height"]! / 2,
+        z: 1, intrinsics: frame.camera.intrinsics, resolution: frame.camera.imageResolution)
       guard let measure = Geometry.measure(depth: frame.sceneDepth,
-        bounds: bounds, intrinsics: frame.camera.intrinsics, resolution: frame.camera.imageResolution, settings: settings) else {
+        bounds: bounds, camera: frame.camera, orientation: orientation) else {
         return [
           "label": "person", "confidence": Double(observation.confidence), "source": "vision-person",
           "cameraTimestampMs": timestamp, "bounds": bounds,
-          "direction": Geometry.direction(normalizedX: bounds["x"]! + bounds["width"]! / 2,
-            normalizedY: bounds["y"]! + bounds["height"]! / 2, distance: 1,
-            intrinsics: frame.camera.intrinsics, imageWidth: Int(frame.camera.imageResolution.width), imageHeight: Int(frame.camera.imageResolution.height))
+          "direction": Geometry.direction(sensorX: center.x, sensorY: center.y, z: center.z, orientation: orientation)
         ] as [String: Any]?
       }
       var object: [String: Any] = [
@@ -75,13 +66,12 @@ enum PerceptionVision {
     }
   }
 
-  static func text(frame: ARFrame, settings: PerceptionSettings) throws -> [[String: Any]] {
+  static func text(frame: ARFrame, orientation: CGImagePropertyOrientation, settings: PerceptionSettings) throws -> [[String: Any]] {
     let request = VNRecognizeTextRequest()
     request.recognitionLevel = .fast
     request.usesLanguageCorrection = false
     request.minimumTextHeight = 0.015
     if !settings.ocrLanguages.isEmpty { request.recognitionLanguages = settings.ocrLanguages }
-    let orientation = interfaceOrientation()
     let handler = VNImageRequestHandler(cvPixelBuffer: frame.capturedImage, orientation: orientation, options: [:])
     try handler.perform([request])
     let observations = request.results ?? []
@@ -89,7 +79,7 @@ enum PerceptionVision {
       guard let candidate = observation.topCandidates(1).first else { return nil }
       let bounds = sensorBounds(observation.boundingBox, orientation: orientation)
       let measure = Geometry.measure(depth: frame.sceneDepth,
-        bounds: bounds, intrinsics: frame.camera.intrinsics, resolution: frame.camera.imageResolution, settings: settings)
+        bounds: bounds, camera: frame.camera, orientation: orientation)
       let box = observation.boundingBox
       let horizontal = box.midX < 1.0 / 3 ? "left" : box.midX > 2.0 / 3 ? "right" : nil
       let vertical = box.midY > 2.0 / 3 ? "upper" : box.midY < 1.0 / 3 ? "lower" : nil
@@ -103,21 +93,15 @@ enum PerceptionVision {
     }
   }
 
-  static func writeJPEG(frame: ARFrame, quality: Double) throws -> [String: Any] {
-    let image = CIImage(cvPixelBuffer: frame.capturedImage)
-    let context = CIContext(options: [.cacheIntermediates: false])
-    guard let output = context.createCGImage(image, from: image.extent) else {
+  static func writeJPEG(frame: ARFrame, orientation: CGImagePropertyOrientation, quality: Double, timestamp: Double, maxImageLongEdge: Double?) throws -> [String: Any] {
+    guard let output = renderFrame(buffer: frame.capturedImage, orientation: orientation, maxImageLongEdge: maxImageLongEdge) else {
       throw PerceptionError("E_CAPTURE", "The captured camera image could not be rendered.")
     }
     let data = NSMutableData()
     guard let destination = CGImageDestinationCreateWithData(data, "public.jpeg" as CFString, 1, nil) else {
       throw PerceptionError("E_CAPTURE", "A JPEG destination could not be created.")
     }
-    let orientation = interfaceOrientation()
-    let properties: [CFString: Any] = [
-      kCGImageDestinationLossyCompressionQuality: min(1, max(0.1, quality)),
-      kCGImagePropertyOrientation: Int(orientation.rawValue)
-    ]
+    let properties: [CFString: Any] = [kCGImageDestinationLossyCompressionQuality: min(1, max(0.1, quality))]
     CGImageDestinationAddImage(destination, output, properties as CFDictionary)
     guard CGImageDestinationFinalize(destination) else {
       throw PerceptionError("E_CAPTURE", "The camera image could not be encoded as JPEG.")
@@ -128,10 +112,23 @@ enum PerceptionVision {
     try (data as Data).write(to: url, options: .atomic)
     pruneCaptures(directory: directory, keeping: url)
     return [
-      "uri": url.absoluteURL.absoluteString, "width": CVPixelBufferGetWidth(frame.capturedImage),
-      "height": CVPixelBufferGetHeight(frame.capturedImage), "rotationDegrees": rotation(orientation),
-      "mimeType": "image/jpeg", "cameraTimestampMs": Geometry.timestamp(frame.timestamp)
+      "uri": url.absoluteURL.absoluteString, "width": output.width, "height": output.height, "rotationDegrees": 0,
+      "mimeType": "image/jpeg", "cameraTimestampMs": timestamp
     ]
+  }
+
+  static func previewImage(buffer: CVPixelBuffer, orientation: CGImagePropertyOrientation) -> CGImage? {
+    renderFrame(buffer: buffer, orientation: orientation, maxImageLongEdge: 384)
+  }
+
+  private static func renderFrame(buffer: CVPixelBuffer, orientation: CGImagePropertyOrientation, maxImageLongEdge: Double?) -> CGImage? {
+    var image = CIImage(cvPixelBuffer: buffer).oriented(orientation)
+    let longest = max(image.extent.width, image.extent.height)
+    if let maxImageLongEdge, longest > maxImageLongEdge {
+      let scale = maxImageLongEdge / longest
+      image = image.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+    }
+    return captureContext.createCGImage(image, from: image.extent)
   }
 
   static func pruneCaptures(directory: URL, keeping: URL? = nil) {
