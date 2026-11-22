@@ -68,6 +68,7 @@ export interface AudioRouteSnapshot {
 }
 
 export interface VoiceCapabilities {
+  installedVoices?: { id: string; name: string; language: string }[];
   available: boolean;
   onDeviceRecognition: boolean;
   offlineSpeech: boolean;

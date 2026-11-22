@@ -32,6 +32,7 @@ function validSettings(value: unknown): GuidanceSettings {
     onboardingComplete: stored.onboardingComplete === true,
     companionName: typeof stored.companionName === 'string' ? normalizeCompanionName(stored.companionName) : '',
     stepLengthMeters: typeof stored.stepLengthMeters === 'number' && stored.stepLengthMeters >= 0.4 && stored.stepLengthMeters <= 1 ? stored.stepLengthMeters : 0.65,
+    voiceIdentifier: typeof stored.voiceIdentifier === 'string' ? stored.voiceIdentifier : undefined,
     speechRate: typeof stored.speechRate === 'number' && stored.speechRate >= 0.5 && stored.speechRate <= 1.5 ? stored.speechRate : 1,
     urgentHaptics: stored.urgentHaptics !== false,
     speakerFallback: stored.speakerFallback !== false,

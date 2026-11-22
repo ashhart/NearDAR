@@ -26,14 +26,14 @@ export default function Setup() {
       if (!mounted.current || enabled) return
       started = true
       return Voice.speak('Point your camera. Download offline descriptions to recognise nearby objects and look for seats. Choose Start hands-free to ask a question using your voice. Say stop camera to finish. NearDAR can miss hazards. Use it alongside your cane, guide dog, and orientation and mobility training.', {
-        rate: settings.speechRate, priority: 'answer', interrupt: true, speakerFallback: settings.speakerFallback,
+        voiceIdentifier: settings.voiceIdentifier, rate: settings.speechRate, priority: 'answer', interrupt: true, speakerFallback: settings.speakerFallback,
       })
     }).catch(() => {})
     return () => {
       mounted.current = false
       if (started) void Voice.stopSpeaking().catch(() => {})
     }
-  }, [settings.speechRate, settings.speakerFallback])
+  }, [settings.speechRate, settings.speakerFallback, settings.voiceIdentifier])
 
   async function finish(downloadReady = false) {
     if (leaving.current || !mounted.current) return

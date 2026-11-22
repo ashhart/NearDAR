@@ -196,6 +196,7 @@ export function GuidanceProvider({ children }: { children: ReactNode }) {
     try {
       await Voice.speak(text, {
         utteranceId,
+        voiceIdentifier: settingsRef.current.voiceIdentifier,
         rate: settingsRef.current.speechRate,
         priority: urgent ? 'urgent' : 'answer',
         interrupt: true,

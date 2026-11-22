@@ -89,6 +89,12 @@ export default function Settings() {
   const [name, setName] = useState(settings.companionName)
   const [testMessage, setTestMessage] = useState('')
   const [showConversation, setShowConversation] = useState(false)
+  const [showVoices, setShowVoices] = useState(false)
+  const [voiceSearch, setVoiceSearch] = useState('')
+  const voices = guide.voice?.installedVoices ?? []
+  const currentVoice = voices.find(({ id }) => id === settings.voiceIdentifier)
+  const query = voiceSearch.trim().toLocaleLowerCase()
+  const matchingVoices = voices.filter(({ name, language }) => `${name} ${language}`.toLocaleLowerCase().includes(query))
   const model = guide.engineStatus
   const previousModel = useRef(model.state)
   const engineBusy = model.state === 'loading' || model.state === 'unloading' || !!guide.questionPhase
@@ -146,6 +152,22 @@ export default function Settings() {
     <StatusCard title="Voice and audio">
       <Toggle label="Hands-free after Ask by voice" caption="Keep listening after each reply until you turn off the microphone." value={settings.continuousListening} onChange={(continuousListening) => void update({ continuousListening })} />
       <Toggle label="Use phone speaker without headphones" caption="When off, losing headphones pauses guidance." value={settings.speakerFallback} onChange={(speakerFallback) => void update({ speakerFallback })} />
+      {voices.length > 0 && <>
+        <Button compact secondary expanded={showVoices}
+          label={`NearDAR speaking voice, ${currentVoice?.name ?? 'System default'}`}
+          onPress={() => setShowVoices(!showVoices)} />
+        {showVoices && <>
+          <Body muted>Hands-free replies use this voice. VoiceOver reads ordinary replies when hands-free is off.</Body>
+          <TextInput accessibilityLabel="Search voices by name or language" placeholder="Search voices"
+            value={voiceSearch} onChangeText={setVoiceSearch}
+            style={[styles.input, { color: colors.text, borderColor: colors.border, backgroundColor: colors.background }]} />
+          <Button compact secondary label="System default" selected={!currentVoice} onPress={() => void update({ voiceIdentifier: undefined })} />
+          {!matchingVoices.length && <Body muted>No voices match your search.</Body>}
+          {matchingVoices.map(({ id, name, language }) =>
+            <Button key={id} compact secondary label={`${name}, ${language}`} selected={id === settings.voiceIdentifier}
+              onPress={() => void update({ voiceIdentifier: id })} />)}
+        </>}
+      </>}
       <SpeakingSpeed value={settings.speechRate} onChange={(speechRate) => void update({ speechRate })} />
       {guide.voice?.reason && <Body muted>{guide.voice.reason}</Body>}
     </StatusCard>
