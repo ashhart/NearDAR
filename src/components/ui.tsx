@@ -77,8 +77,8 @@ export function Body({ children, muted = false, live = false }: { children: Reac
   return <Text aria-live={live ? 'polite' : undefined} style={[styles.body, { color: muted ? colors.muted : colors.text }]}>{children}</Text>
 }
 
-export function Button({ label, onPress, icon, secondary = false, stop = false, disabled = false, busy = false, compact = false, row = false, hint, testID, selected, hostRef }: {
-  label: string; onPress(): void; icon?: IconName; secondary?: boolean; stop?: boolean; disabled?: boolean; busy?: boolean; compact?: boolean; row?: boolean; hint?: string; testID?: string; selected?: boolean; hostRef?: Ref<View>
+export function Button({ label, onPress, icon, secondary = false, stop = false, disabled = false, busy = false, compact = false, row = false, hint, testID, selected, expanded, hostRef }: {
+  label: string; onPress(): void; icon?: IconName; secondary?: boolean; stop?: boolean; disabled?: boolean; busy?: boolean; compact?: boolean; row?: boolean; hint?: string; testID?: string; selected?: boolean; expanded?: boolean; hostRef?: Ref<View>
 }) {
   const colors = useColors()
   const [focused, setFocused] = useState(false)
@@ -91,7 +91,7 @@ export function Button({ label, onPress, icon, secondary = false, stop = false, 
     accessibilityRole="button"
     accessibilityLabel={label}
     accessibilityHint={hint}
-    accessibilityState={{ disabled: disabled || busy, busy, selected }}
+    accessibilityState={{ disabled: disabled || busy, busy, selected, expanded }}
     disabled={disabled || busy}
     onPress={onPress}
     onFocus={() => setFocused(true)}

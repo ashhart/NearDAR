@@ -67,6 +67,7 @@ export interface EngineStatus {
 }
 
 export interface VoiceCapabilities {
+  installedVoices?: { id: string; name: string; language: string }[]
   available: boolean
   onDeviceRecognition: boolean
   offlineSpeech: boolean
@@ -78,6 +79,7 @@ export interface GuidanceSettings {
   onboardingComplete: boolean
   companionName: string
   stepLengthMeters: number
+  voiceIdentifier?: string
   speechRate: number
   urgentHaptics: boolean
   speakerFallback: boolean
