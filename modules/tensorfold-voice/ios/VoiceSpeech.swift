@@ -74,6 +74,7 @@ extension VoiceController {
       return
     }
     utterances.removeAll()
+    spatialAudio.setSpeechActive(false)
     for tracked in active.sorted(by: { $0.id < $1.id }) {
       emitUtterance(tracked, state: "stopped", reason: reason)
     }
@@ -83,6 +84,7 @@ extension VoiceController {
   func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didStart utterance: AVSpeechUtterance) {
     DispatchQueue.main.async {
       guard let tracked = self.utterances[ObjectIdentifier(utterance)] else { return }
+      self.spatialAudio.setSpeechActive(true)
       self.emitUtterance(tracked, state: "started")
     }
   }
@@ -90,6 +92,7 @@ extension VoiceController {
   func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
     DispatchQueue.main.async {
       guard let tracked = self.utterances.removeValue(forKey: ObjectIdentifier(utterance)) else { return }
+      if self.utterances.isEmpty { self.spatialAudio.setSpeechActive(false) }
       self.emitUtterance(tracked, state: "finished")
       self.deactivateAudioIfIdle()
     }
@@ -98,6 +101,7 @@ extension VoiceController {
   func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
     DispatchQueue.main.async {
       guard let tracked = self.utterances.removeValue(forKey: ObjectIdentifier(utterance)) else { return }
+      if self.utterances.isEmpty { self.spatialAudio.setSpeechActive(false) }
       self.emitUtterance(tracked, state: "stopped", reason: "cancelled")
       self.deactivateAudioIfIdle()
     }

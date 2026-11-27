@@ -2,6 +2,56 @@ import { type EventSubscription, requireOptionalNativeModule } from 'expo-module
 
 export type DepthState = 'unavailable' | 'starting' | 'ready' | 'stale' | 'limited' | 'lost';
 export type Direction = 'ahead' | 'ahead-left' | 'ahead-right' | 'left' | 'right' | 'behind' | 'unknown';
+export type CorridorState = 'clear' | 'narrow' | 'blocked' | 'unknown';
+export type AimState = 'level' | 'too-low' | 'too-high' | 'lowered' | 'covered';
+
+export interface CorridorSector {
+  index: number;
+  centerDegrees: number;
+  label: string;
+  clearanceMeters: number;
+  sampleCount: number;
+  confidence: number;
+}
+
+export interface CorridorOpening {
+  bearingDegrees: number;
+  direction: Direction;
+  distanceMeters: number;
+  clearanceMeters: number;
+  widthDegrees: number;
+}
+
+export interface CorridorSummary {
+  sectors: CorridorSector[];
+  openings?: CorridorOpening[];
+  recommendedHeadingOffsetDeg: number;
+  corridorState: CorridorState;
+  forwardClearanceMeters: number;
+  bestClearanceMeters: number;
+  aimState: AimState;
+  pitchDegrees: number;
+  headingDegrees?: number;
+  floorHeightMeters?: number;
+  maxClosingSpeedMps?: number;
+  recedingObstacle?: boolean;
+  valid: boolean;
+}
+
+export interface SpatialHazard {
+  id: string;
+  kind: 'fast-mover' | 'obstacle' | 'head-height' | 'step-down' | 'step-up' | 'drop-off' | 'doorway';
+  severity: 'info' | 'caution' | 'urgent';
+  direction: Direction;
+  bearingDegrees: number;
+  distanceMeters: number;
+  confidence: number;
+  message: string;
+  observedAt: number;
+  closingSpeedMps?: number;
+  externalSpeedMps?: number;
+  ttcSeconds?: number;
+}
 
 export interface SessionOptions {
   /** Physical distance represented by one user step. No uncalibrated estimate is emitted. */
@@ -70,12 +120,15 @@ export type SeatAlignmentResult = 'aligned' | 'cancelled' | 'unavailable' | 'tra
 export interface SceneWarning {
   id: string;
   label?: string;
-  kind: 'obstacle' | 'step-up' | 'step-down' | 'drop-off' | 'sensor';
+  kind: 'fast-mover' | 'obstacle' | 'head-height' | 'step-up' | 'step-down' | 'drop-off' | 'doorway' | 'sensor';
   severity: 'info' | 'caution' | 'urgent';
   message: string;
   observedAt: number;
   distanceMeters?: number;
   direction?: Direction;
+  closingSpeedMps?: number;
+  externalSpeedMps?: number;
+  ttcSeconds?: number;
 }
 
 export interface PerceptionStatus {
@@ -106,6 +159,11 @@ export interface SceneSnapshot {
   temporaryImagePath?: string;
   imageWidth?: number;
   imageHeight?: number;
+  corridor?: CorridorSummary;
+  hazards?: SpatialHazard[];
+  headingDegrees?: number;
+  aimState?: AimState;
+  pitchDegrees?: number;
   notes: string[];
 }
 

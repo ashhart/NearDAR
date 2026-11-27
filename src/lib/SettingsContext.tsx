@@ -13,3 +13,7 @@ export function useAppSettings() {
   if (!value) throw new Error('SettingsProvider is missing')
   return value
 }
+
+export function useOptionalAppSettings() {
+  return useContext(Context)
+}

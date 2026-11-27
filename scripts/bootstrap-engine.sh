@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-revision="7b5c1f29103c94b2d6fd7bc45bd00f8f1f4217b9"
+revision="1a3a10d9194c58decd228ce3084f1ccae885a26a"
 destination="$ROOT/vendor/TensorFold"
 
 if [[ -d "$destination/.git" ]]; then

@@ -17,3 +17,9 @@ for (const relative of globSync('**/*.zig', { cwd: `${output}/zig` })) {
   changed += 1
 }
 if (changed === 0) throw new Error('No threaded IO owners found in the TensorFold source overlay')
+
+// Single Zig module root for sibling native Metal families (avoids duplicate file ownership of cache_fit.zig).
+writeFileSync(
+  `${output}/zig/src/native/phone_families.zig`,
+  'pub const lfm3 = @import("lfm3.zig");\npub const qwen35 = @import("qwen35.zig");\npub const qwen27_engine = @import("qwen27_engine.zig");\n',
+)

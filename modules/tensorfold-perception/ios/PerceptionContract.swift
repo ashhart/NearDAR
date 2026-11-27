@@ -98,6 +98,21 @@ enum PerceptionContract {
       result["imageWidth"] = image["width"]
       result["imageHeight"] = image["height"]
     }
+    if let corridor = native["corridor"] as? [String: Any] {
+      result["corridor"] = corridor
+    }
+    if let hazards = native["hazards"] as? [[String: Any]] {
+      result["hazards"] = hazards
+    }
+    if let headingDegrees = native["headingDegrees"] as? Double {
+      result["headingDegrees"] = headingDegrees
+    }
+    if let aimState = native["aimState"] as? String {
+      result["aimState"] = aimState
+    }
+    if let pitchDegrees = native["pitchDegrees"] as? Double {
+      result["pitchDegrees"] = pitchDegrees
+    }
     return result
   }
 
@@ -105,21 +120,26 @@ enum PerceptionContract {
     let obstacle = native["obstacle"] as? [String: Any] ?? [:]
     let heading = direction(native["direction"] as? [String: Any])
     let distance = native["distanceMeters"] as? Double
+    let kind = native["kind"] as? String ?? "obstacle"
     let measurement: String
     if let steps = stepCount(obstacle) { measurement = "about \(Int(steps.rounded())) calibrated steps" }
     else if let distance { measurement = "about \(String(format: "%.1f", max(0.1, distance))) metres" }
     else { measurement = "distance unavailable" }
     let label = native["label"] as? String
     let name = label?.capitalized ?? "Obstacle"
+    let defaultMessage = "\(name) \(heading.replacingOccurrences(of: "-", with: " ")), \(measurement)."
     var result: [String: Any] = [
-      "id": "ios-live-obstacle",
-      "kind": "obstacle", "severity": native["severity"] as? String == "critical" ? "urgent" : "caution",
-      "message": "\(name) \(heading.replacingOccurrences(of: "-", with: " ")), \(measurement).",
+      "id": native["id"] as? String ?? "ios-live-obstacle",
+      "kind": kind, "severity": native["severity"] as? String == "critical" ? "urgent" : "caution",
+      "message": native["message"] as? String ?? defaultMessage,
       "observedAt": native["timestampMs"] as? Double ?? Date().timeIntervalSince1970 * 1000,
       "direction": heading
     ]
     if let distance { result["distanceMeters"] = distance }
     if let label { result["label"] = label }
+    if let closing = native["closingSpeedMps"] as? Double { result["closingSpeedMps"] = closing }
+    if let external = native["externalSpeedMps"] as? Double { result["externalSpeedMps"] = external }
+    if let ttc = native["ttcSeconds"] as? Double { result["ttcSeconds"] = ttc }
     return result
   }
 

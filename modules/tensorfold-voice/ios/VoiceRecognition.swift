@@ -98,6 +98,7 @@ extension VoiceController {
   private func beginRecognition(generation: Int, recognizer: SFSpeechRecognizer, preferBluetooth: Bool) {
     guard let pending = pendingStart, pending.generation == generation else { return }
     do {
+      spatialAudio.setMicActive(true)
       try VoiceAudio.activate(operation: "startListening", recognition: true, preferBluetoothMicrophone: preferBluetooth)
       let engine = AVAudioEngine()
       let format = engine.inputNode.outputFormat(forBus: 0)
@@ -225,6 +226,7 @@ extension VoiceController {
     if hadSession { emitListening("stopped", reason: reason) }
     activeSessionId = nil
     activeLocale = nil
+    spatialAudio.setMicActive(false)
     deactivateAudioIfIdle()
   }
 }

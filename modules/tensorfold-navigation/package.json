@@ -1,0 +1,8 @@
+{
+  "name": "tensorfold-navigation",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Native CoreLocation heading, MapKit walking routes, and place search for NearDar",
+  "main": "src/index.ts",
+  "types": "src/index.ts"
+}

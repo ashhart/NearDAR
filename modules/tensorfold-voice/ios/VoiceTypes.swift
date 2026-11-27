@@ -19,6 +19,20 @@ struct SpeakOptions: Record {
   @Field var volume: Double?
 }
 
+struct SpatialBeaconOptions: Record {
+  @Field var active: Bool = false
+  @Field var azimuthDeg: Double = 0
+  @Field var distanceMeters: Double = 2.0
+  @Field var headphonesOnly: Bool = true
+}
+
+struct SpatialCueOptions: Record {
+  @Field var kind: String = "obstacle"
+  @Field var azimuthDeg: Double = 0
+  @Field var distanceMeters: Double = 1.5
+  @Field var elevationMeters: Double = 0
+}
+
 struct VoiceFailure: LocalizedError {
   let operation: String
   let code: String

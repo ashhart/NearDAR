@@ -1,5 +1,7 @@
+import CoreGraphics
 import ExpoModulesCore
 import Foundation
+import ImageIO
 import Metal
 
 private final class PendingGeneration {
@@ -11,6 +13,12 @@ private final class PendingGeneration {
         self.requestId = requestId
         self.promise = promise
     }
+}
+
+private struct DecodedRgbImage {
+    let width: UInt32
+    let height: UInt32
+    let pixels: [UInt8]
 }
 
 private func nativeCallback(
@@ -41,6 +49,8 @@ public final class TensorFoldEngineModule: Module {
     private let requestLock = NSLock()
     private let stateLock = NSLock()
     private var nativeEngine: SonarTensorFoldEngine?
+    private var loadedModelType: String = "lfm3_vl"
+    private var loadedHasVision: Bool = false
     private var requests = [UInt64: PendingGeneration]()
     private var nativeRequestIds = [String: UInt64]()
     private var nextRequestId: UInt64 = 1
@@ -50,8 +60,9 @@ public final class TensorFoldEngineModule: Module {
     private var installationTotalBytes: Int64 = 0
     private var lastError: String?
     private var loadedInstallationId: String?
-    private let defaultsKey = "TensorFoldEngine.selectedInstallation.v1"
-    private let installSize: Int64 = 1_749_077_616
+    private let defaultsKey = "TensorFoldEngine.selectedInstallation.v2"
+    private let defaultModelId = "lfm3-vl-2b"
+    private let installSize: Int64 = 1_609_116_269
 
     public required init(appContext: AppContext) {
         super.init(appContext: appContext)
@@ -72,12 +83,12 @@ public final class TensorFoldEngineModule: Module {
 
         AsyncFunction("getCapabilities") { () -> [String: Any] in
             let device = MTLCreateSystemDefaultDevice()
-            let enoughMemory = ProcessInfo.processInfo.physicalMemory >= 6 * 1024 * 1024 * 1024
+            let enoughMemory = ProcessInfo.processInfo.physicalMemory >= 4 * 1024 * 1024 * 1024
             let reason: String?
             if device == nil {
                 reason = "No Metal device is available. No inference was started."
             } else if !enoughMemory {
-                reason = "Qwen3.5-2B requires at least 6 GiB of physical memory in this build. No inference was started."
+                reason = "TensorFold Mobile LFM3-VL-2B requires at least 4 GiB of physical memory."
             } else {
                 reason = nil
             }
@@ -85,7 +96,8 @@ public final class TensorFoldEngineModule: Module {
                 "available": device != nil && enoughMemory,
                 "platform": "ios",
                 "backend": "metal",
-                "vision": false,
+                "vision": device != nil && enoughMemory,
+                "modelId": self.defaultModelId,
                 "installSizeBytes": self.installSize,
                 "reason": reason ?? NSNull(),
             ]
@@ -114,7 +126,7 @@ public final class TensorFoldEngineModule: Module {
                 let nativeId = self.nativeRequestIds[requestId]
                 self.requestLock.unlock()
                 guard let nativeId, let nativeEngine = self.nativeEngine else {
-                    promise.reject("E_TF_NOT_FOUND", "No active TensorFold request has id \(requestId).")
+                    promise.resolve(nil)
                     return
                 }
                 sonar_tf_cancel(nativeEngine, nativeId)
@@ -138,7 +150,7 @@ public final class TensorFoldEngineModule: Module {
         let stored = installation()
         var result: [String: Any] = [
             "state": state,
-            "modelId": stored?["modelId"] ?? "qwen3.5-2b",
+            "modelId": stored?["modelId"] ?? defaultModelId,
         ]
         result["installationId"] = installationId ?? stored?["installationId"] ?? NSNull()
         if let progress { result["progress"] = progress }
@@ -180,7 +192,7 @@ public final class TensorFoldEngineModule: Module {
             promise.reject("E_TF_BUSY", "Unload the model before installing another checkpoint.")
             return
         }
-        let modelId = manifest["modelId"] as? String ?? "qwen3.5-2b"
+        let modelId = manifest["modelId"] as? String ?? defaultModelId
         let files = manifest["files"] as? [[String: Any]] ?? []
         stateLock.lock()
         installingModelId = modelId
@@ -200,12 +212,13 @@ public final class TensorFoldEngineModule: Module {
                 self.emitStatus(self.currentStatus())
             }
             let installationId = "\(result["modelId"] as? String ?? modelId)@\(result["revision"] as? String ?? "")"
+            let sizeBytes = result["sizeBytes"] as? Int64 ?? installSize
             let stored: [String: Any] = [
                 "installationId": installationId,
                 "modelId": result["modelId"] as? String ?? modelId,
                 "revision": result["revision"] as? String ?? "",
                 "directory": result["directory"] as? String ?? "",
-                "sizeBytes": result["sizeBytes"] as? Int64 ?? installSize,
+                "sizeBytes": sizeBytes,
             ]
             UserDefaults.standard.set(stored, forKey: defaultsKey)
             stateLock.lock()
@@ -214,7 +227,7 @@ public final class TensorFoldEngineModule: Module {
             installationTotalBytes = 0
             lastError = nil
             stateLock.unlock()
-            let status = status("installed", installationId: installationId, downloadedBytes: installSize, totalBytes: installSize)
+            let status = status("installed", installationId: installationId, downloadedBytes: sizeBytes, totalBytes: sizeBytes)
             emitStatus(status)
             promise.resolve(status)
         } catch {
@@ -230,14 +243,13 @@ public final class TensorFoldEngineModule: Module {
     }
 
     private func load(_ requestedId: String?, promise: Promise) {
-        if let nativeEngine {
-            _ = nativeEngine
+        if nativeEngine != nil {
             promise.resolve(status("ready", installationId: loadedInstallationId))
             return
         }
         guard let stored = installation(), let directory = stored["directory"] as? String,
               let installationId = stored["installationId"] as? String else {
-            promise.reject("E_TF_NOT_INSTALLED", "Install the pinned model before loading it.")
+            promise.reject("E_TF_NOT_INSTALLED", "Install the pinned TensorFold model before loading it.")
             return
         }
         guard requestedId == nil || requestedId == installationId else {
@@ -250,14 +262,21 @@ public final class TensorFoldEngineModule: Module {
         stateLock.unlock()
         emitStatus(currentStatus())
         var error = [CChar](repeating: 0, count: 8192)
+        // Mobile-sized context window (2048 tokens) with 0 MiB prompt-cache overhead keeps Metal RAM lean on iPhones.
         let opened = directory.withCString { path in
-            sonar_tf_open(path, 4096, 64, &error, error.count)
+            sonar_tf_open(path, 2048, 0, &error, error.count)
         }
         stateLock.lock()
         loading = false
         if let opened {
             nativeEngine = opened
             loadedInstallationId = installationId
+            let infoRaw = String(cString: sonar_tf_info_json(opened))
+            if let data = infoRaw.data(using: .utf8),
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                loadedModelType = json["modelType"] as? String ?? "lfm3_vl"
+                loadedHasVision = json["vision"] as? Bool ?? false
+            }
         } else {
             lastError = String(cString: error)
         }
@@ -284,6 +303,7 @@ public final class TensorFoldEngineModule: Module {
         let opened = nativeEngine
         nativeEngine = nil
         loadedInstallationId = nil
+        loadedHasVision = false
         stateLock.unlock()
         if let opened { sonar_tf_close(opened) }
         emitStatus(status("installed"))
@@ -292,7 +312,7 @@ public final class TensorFoldEngineModule: Module {
 
     private func generate(_ request: [String: Any], promise: Promise) {
         guard let nativeEngine else {
-            promise.reject("E_TF_NOT_LOADED", "Load the model before generation.")
+            promise.reject("E_TF_NOT_LOADED", "Load the TensorFold model before generation.")
             return
         }
         guard let requestId = request["requestId"] as? String, !requestId.isEmpty,
@@ -317,11 +337,31 @@ public final class TensorFoldEngineModule: Module {
             promise.reject("E_TF_BUSY", "This phone engine admits one generation at a time.")
             return
         }
-        let formatted = "<|im_start|>system\n\(system)<|im_end|>\n<|im_start|>user\n\(prompt)<|im_end|>\n<|im_start|>assistant\n"
+
+        // Optional image input for TensorFold native Metal vision (LFM3-VL-2B)
+        var decodedImage: DecodedRgbImage?
+        let temporaryPath = request["temporaryImagePath"] as? String
+        let imageBase64 = request["imageBase64"] as? String
+        if (temporaryPath != nil && !(temporaryPath?.isEmpty ?? true)) || (imageBase64 != nil && !(imageBase64?.isEmpty ?? true)) {
+            guard loadedHasVision else {
+                promise.reject("E_TF_NO_VISION", "The loaded TensorFold checkpoint does not have a vision tower.")
+                return
+            }
+            do {
+                decodedImage = try decodeRgbImage(temporaryPath: temporaryPath, imageBase64: imageBase64, maxLongEdge: 512)
+            } catch {
+                promise.reject("E_TF_IMAGE", "Could not decode scene image for TensorFold vision: \(error.localizedDescription)")
+                return
+            }
+        }
+
+        let maxImageTokens = UInt32(max(64, min(256, (request["maxImageTokens"] as? NSNumber)?.intValue ?? 192)))
+        let formatted = formatPrompt(system: system, prompt: prompt, hasImage: decodedImage != nil)
         guard formatted.utf8.count <= 256 * 1024 else {
             promise.reject("E_TF_REQUEST", "Prompt and system text exceed 256 KiB.")
             return
         }
+
         let nativeId = nextRequestId
         nextRequestId &+= 1
         let pending = PendingGeneration(requestId: requestId, promise: promise)
@@ -330,9 +370,21 @@ public final class TensorFoldEngineModule: Module {
         requests[nativeId] = pending
         nativeRequestIds[requestId] = nativeId
         requestLock.unlock()
+
         var error = [CChar](repeating: 0, count: 2048)
-        let accepted = formatted.withCString { text in
-            sonar_tf_generate(
+        let accepted: Int32 = formatted.withCString { text in
+            if let img = decodedImage {
+                return img.pixels.withUnsafeBufferPointer { pixelBuf in
+                    sonar_tf_generate_vision(
+                        nativeEngine, nativeId, text, formatted.utf8.count,
+                        pixelBuf.baseAddress, img.width, img.height, maxImageTokens,
+                        UInt32(maxTokens),
+                        temperature > 0 ? 1 : 0, temperature, 40, 0.95, 0, nativeId,
+                        nativeCallback, context, &error, error.count
+                    )
+                }
+            }
+            return sonar_tf_generate(
                 nativeEngine, nativeId, text, formatted.utf8.count, UInt32(maxTokens),
                 temperature > 0 ? 1 : 0, temperature, 40, 0.95, 0, nativeId,
                 nativeCallback, context, &error, error.count
@@ -347,6 +399,88 @@ public final class TensorFoldEngineModule: Module {
         }
     }
 
+    private func formatPrompt(system: String, prompt: String, hasImage: Bool) -> String {
+        if loadedModelType == "lfm3_vl" || loadedModelType == "lfm3" {
+            let visionPrefix = hasImage ? "<|vision_start|><|image|><|vision_end|>" : ""
+            return "<|startoftext|><|im_start|>system\n\(system)<|im_end|>\n<|im_start|>user\n\(visionPrefix)\(prompt)<|im_end|>\n<|im_start|>assistant\n<think></think>"
+        }
+        return "<|im_start|>system\n\(system)<|im_end|>\n<|im_start|>user\n\(prompt)<|im_end|>\n<|im_start|>assistant\n"
+    }
+
+    private func decodeRgbImage(temporaryPath: String?, imageBase64: String?, maxLongEdge: Int) throws -> DecodedRgbImage {
+        let source: CGImageSource
+        if let temporaryPath, !temporaryPath.isEmpty {
+            let url: URL
+            if temporaryPath.hasPrefix("file://"), let parsed = URL(string: temporaryPath), parsed.isFileURL {
+                url = parsed
+            } else {
+                url = URL(fileURLWithPath: temporaryPath)
+            }
+            guard let created = CGImageSourceCreateWithURL(url as CFURL, nil) else {
+                throw NSError(domain: "TensorFoldEngine", code: 1, userInfo: [NSLocalizedDescriptionKey: "Could not open image file."])
+            }
+            source = created
+        } else if let imageBase64, let data = Data(base64Encoded: imageBase64) {
+            guard let created = CGImageSourceCreateWithData(data as CFData, nil) else {
+                throw NSError(domain: "TensorFoldEngine", code: 2, userInfo: [NSLocalizedDescriptionKey: "Could not decode base64 image."])
+            }
+            source = created
+        } else {
+            throw NSError(domain: "TensorFoldEngine", code: 3, userInfo: [NSLocalizedDescriptionKey: "No valid image source supplied."])
+        }
+
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxLongEdge,
+            kCGImageSourceShouldCacheImmediately: true,
+        ]
+        guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
+            ?? CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+            throw NSError(domain: "TensorFoldEngine", code: 4, userInfo: [NSLocalizedDescriptionKey: "ImageIO failed to decode CGImage."])
+        }
+
+        let width = cgImage.width
+        let height = cgImage.height
+        guard width > 0, height > 0 else {
+            throw NSError(domain: "TensorFoldEngine", code: 5, userInfo: [NSLocalizedDescriptionKey: "Decoded image has zero dimensions."])
+        }
+
+        let bytesPerRow = width * 4
+        var rgba = [UInt8](repeating: 0, count: height * bytesPerRow)
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let bitmapInfo = CGImageAlphaInfo.noneSkipLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue
+        let drew = rgba.withUnsafeMutableBytes { ptr -> Bool in
+            guard let ctx = CGContext(
+                data: ptr.baseAddress,
+                width: width,
+                height: height,
+                bitsPerComponent: 8,
+                bytesPerRow: bytesPerRow,
+                space: colorSpace,
+                bitmapInfo: bitmapInfo
+            ) else { return false }
+            ctx.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return true
+        }
+        guard drew else {
+            throw NSError(domain: "TensorFoldEngine", code: 6, userInfo: [NSLocalizedDescriptionKey: "CGContext failed to render RGB pixels."])
+        }
+
+        var rgb = [UInt8](repeating: 0, count: width * height * 3)
+        var src = 0
+        var dst = 0
+        let totalPixels = width * height
+        for _ in 0..<totalPixels {
+            rgb[dst] = rgba[src]
+            rgb[dst + 1] = rgba[src + 1]
+            rgb[dst + 2] = rgba[src + 2]
+            src += 4
+            dst += 3
+        }
+        return DecodedRgbImage(width: UInt32(width), height: UInt32(height), pixels: rgb)
+    }
+
     fileprivate func handleNativeEvent(
         requestId: UInt64,
         kind: SonarTensorFoldEventKind,
@@ -359,10 +493,18 @@ public final class TensorFoldEngineModule: Module {
         if kind.rawValue == 1 {
             requestLock.lock()
             let pending = requests[requestId]
-            pending?.streamedText = value ?? pending?.streamedText ?? ""
+            if let delta = value, !delta.isEmpty {
+                pending?.streamedText += delta
+            }
+            let accumulated = pending?.streamedText ?? ""
             requestLock.unlock()
-            if let pending {
-                sendEvent("onEngineEvent", ["type": "token", "requestId": pending.requestId, "token": value ?? ""])
+            if let pending, let delta = value, !delta.isEmpty {
+                sendEvent("onEngineEvent", [
+                    "type": "token",
+                    "requestId": pending.requestId,
+                    "token": delta,
+                    "text": accumulated,
+                ])
             }
             return
         }

@@ -51,6 +51,37 @@ export interface SpeakOptions {
   volume?: number;
 }
 
+export type SpatialCueKind =
+  | 'obstacle'
+  | 'head-height'
+  | 'drop-off'
+  | 'step-down'
+  | 'fast-mover'
+  | 'presence'
+  | 'opening'
+  | 'standby'
+  | 'turn-left'
+  | 'turn-right'
+  | 'mic-open'
+  | 'mic-close'
+  | 'paused'
+  | 'resumed'
+  | 'arrived';
+
+export interface SpatialBeaconOptions {
+  active: boolean;
+  azimuthDeg?: number;
+  distanceMeters?: number;
+  headphonesOnly?: boolean;
+}
+
+export interface SpatialCueOptions {
+  kind: SpatialCueKind;
+  azimuthDeg?: number;
+  distanceMeters?: number;
+  elevationMeters?: number;
+}
+
 export interface AudioRoutePort {
   id: string;
   name: string;
@@ -110,6 +141,9 @@ declare class TensorFoldVoiceNativeModule extends NativeModule<VoiceEvents> {
     locale: string;
   }>;
   stopSpeaking(): Promise<void>;
+  updateSpatialBeacon?(options: SpatialBeaconOptions): Promise<void>;
+  playSpatialCue?(options: SpatialCueOptions): Promise<void>;
+  stopSpatialAudio?(): Promise<void>;
 }
 
 class UnavailableVoiceNativeModule extends NativeModule<VoiceEvents> {
@@ -177,6 +211,18 @@ export function speak(text: string, options: SpeakOptions = {}): Promise<{
 
 export function stopSpeaking(): Promise<void> {
   return Voice.stopSpeaking();
+}
+
+export function updateSpatialBeacon(options: SpatialBeaconOptions): Promise<void> {
+  return Voice.updateSpatialBeacon?.(options) ?? Promise.resolve();
+}
+
+export function playSpatialCue(options: SpatialCueOptions): Promise<void> {
+  return Voice.playSpatialCue?.(options) ?? Promise.resolve();
+}
+
+export function stopSpatialAudio(): Promise<void> {
+  return Voice.stopSpatialAudio?.() ?? Promise.resolve();
 }
 
 export function addVoiceListener(listener: (event: VoiceEvent) => void): EventSubscription {

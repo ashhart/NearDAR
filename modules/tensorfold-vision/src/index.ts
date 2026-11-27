@@ -39,10 +39,12 @@ export interface DescribeSceneRequest {
 }
 
 export interface VisionEvent {
-  type: 'status' | 'started' | 'completed' | 'cancelled' | 'error'
+  type: 'status' | 'started' | 'token' | 'completed' | 'cancelled' | 'error'
   status?: VisionStatus
   requestId?: string
   message?: string
+  delta?: string
+  text?: string
 }
 
 export const VISION_MODEL = {

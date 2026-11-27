@@ -3,6 +3,7 @@ import Ionicons from '@expo/vector-icons/Ionicons'
 import { useFocusEffect } from 'expo-router'
 import { AccessibilityInfo, ActivityIndicator, Platform, Pressable, ScrollView, StyleSheet, Text, View, useColorScheme, useWindowDimensions } from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
+import { useOptionalAppSettings } from '../lib/SettingsContext'
 
 const light = {
   background: '#F6F3EC', panel: '#FFFEFA', raised: '#EAE9FB', border: '#817D93', divider: '#DBD6CA',
@@ -16,8 +17,18 @@ const dark: typeof light = {
   stop: '#FFD8DC', stopSurface: '#40252E', ready: '#B4E2CC', warning: '#FFD8AE', warningSurface: '#443025',
 }
 
+/** OLED True-Black high-contrast palette for low-vision and photophobic users (zero light bleed, max luminance ratio). */
+const oledHighContrast: typeof light = {
+  background: '#000000', panel: '#0B0B0B', raised: '#161616', border: '#FFFFFF', divider: '#5A5A5A',
+  text: '#FFFFFF', muted: '#E5E5E5', accent: '#FFE600', ink: '#000000', focus: '#FFE600',
+  stop: '#FF453A', stopSurface: '#2C0B0E', ready: '#30D158', warning: '#FFD60A', warningSurface: '#2B2200',
+}
+
 export function useColors() {
-  return useColorScheme() === 'dark' ? dark : light
+  const scheme = useColorScheme()
+  const store = useOptionalAppSettings()
+  if (store?.settings.oledHighContrast) return oledHighContrast
+  return scheme === 'dark' ? dark : light
 }
 
 export type IconName = ComponentProps<typeof Ionicons>['name']
@@ -119,9 +130,9 @@ export function StatusCard({ title, children }: { title: string; children: React
 export function TopBar({ back, settings, settingsDisabled = false }: { back?: () => void; settings?: () => void; settingsDisabled?: boolean }) {
   const colors = useColors()
   return <View style={styles.topBar}>
-    {back ? <Button compact secondary icon="chevron-back" label="Back to NearDAR" onPress={back} /> : <View style={styles.brand}>
+    {back ? <Button compact secondary icon="chevron-back" label="Back to NearDar" onPress={back} /> : <View style={styles.brand}>
       <View style={[styles.logomark, { backgroundColor: colors.raised }]}><Icon name="radio-outline" size={24} color={colors.accent} /></View>
-      <Text style={[styles.wordmark, { color: colors.text }]}>NearDAR</Text>
+      <Text style={[styles.wordmark, { color: colors.text }]}>NearDar</Text>
     </View>}
     {settings && <Button compact secondary icon="settings-outline" label="Settings" disabled={settingsDisabled} onPress={settings} />}
   </View>

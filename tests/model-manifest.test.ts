@@ -20,9 +20,37 @@ test('resolves the manifest on React Native AbortSignals without throwIfAborted'
     .mockResolvedValueOnce(new Response('{}'))
   try {
     const manifest = await createDefaultManifest(legacyController().signal)
+    expect(manifest.modelId).toBe('lfm3-vl-2b')
     expect(manifest.files.map((file) => file.path)).toEqual(['config.json', 'tokenizer.json', 'model.safetensors'])
     expect(fetch).toHaveBeenCalledTimes(3)
     expect(manifest.files[2]?.sha256).toBe('a'.repeat(64))
+  } finally {
+    fetch.mockRestore()
+  }
+})
+
+test('includes processor_config.json and uses LFS digest for large tokenizer.json without re-downloading', async () => {
+  const lfmFiles = [
+    { path: 'config.json', size: 2 },
+    { path: 'processor_config.json', size: 2 },
+    { path: 'tokenizer.json', size: 17_000_000, lfs: { oid: 'b'.repeat(64) } },
+    { path: 'model.safetensors', size: 1_500_000_000, lfs: { oid: 'c'.repeat(64) } },
+  ]
+  const fetch = spyOn(globalThis, 'fetch')
+    .mockResolvedValueOnce(Response.json(lfmFiles))
+    .mockResolvedValueOnce(new Response('{}'))
+    .mockResolvedValueOnce(new Response('{}'))
+  try {
+    const manifest = await createDefaultManifest()
+    expect(manifest.files.map((file) => file.path)).toEqual([
+      'config.json',
+      'processor_config.json',
+      'tokenizer.json',
+      'model.safetensors',
+    ])
+    expect(fetch).toHaveBeenCalledTimes(3)
+    expect(manifest.files[2]?.sha256).toBe('b'.repeat(64))
+    expect(manifest.files[3]?.sha256).toBe('c'.repeat(64))
   } finally {
     fetch.mockRestore()
   }

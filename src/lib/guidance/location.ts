@@ -65,10 +65,10 @@ function reportedAccuracy({ coords: { accuracy } }: LocationObject): number | un
 }
 
 export async function describeCurrentLocation(signal: AbortSignal, permissionPending: (pending: boolean) => void): Promise<string | undefined> {
-  if (Platform.OS === 'web') return 'Open NearDAR on your phone to hear your current location.'
+  if (Platform.OS === 'web') return 'Open NearDar on your phone to hear your current location.'
   const location = await import('expo-location').catch(() => null)
   if (signal.aborted) return
-  if (!location) return 'Update the NearDAR mobile app to look up your location.'
+  if (!location) return 'Update the NearDar mobile app to look up your location.'
   const current = await location.getForegroundPermissionsAsync()
   if (signal.aborted) return
   let granted = current.granted

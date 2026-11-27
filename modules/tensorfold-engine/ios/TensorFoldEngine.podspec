@@ -12,7 +12,7 @@ Pod::Spec.new do |s|
   s.dependency 'ExpoModulesCore'
   s.source_files = '*.{swift,h,m,mm}'
   s.vendored_frameworks = 'vendor/TensorFoldMobile.xcframework'
-  s.frameworks = 'Foundation', 'Metal', 'IOSurface'
+  s.frameworks = 'Foundation', 'Metal', 'IOSurface', 'CoreGraphics', 'ImageIO'
   s.libraries = 'objc'
   s.pod_target_xcconfig = {
     'DEFINES_MODULE' => 'YES',

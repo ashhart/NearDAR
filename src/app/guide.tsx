@@ -1,260 +1,519 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
-import { Keyboard, Linking, Platform, StyleSheet, Text, TextInput, View, type ViewProps } from 'react-native'
-import { router, useFocusEffect, useLocalSearchParams } from 'expo-router'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import {
+  Keyboard,
+  Linking,
+  Modal,
+  PanResponder,
+  Platform,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+  type ViewProps,
+} from 'react-native'
+import { SafeAreaView } from 'react-native-safe-area-context'
+import { router } from 'expo-router'
 import { requireNativeViewManager } from 'expo-modules-core'
-import { Body, Button, Heading, Icon, Label, Screen, Signal, StatusCard, TopBar, useColors } from '../components/ui'
-import { useGuidance } from '../lib/guidance/useGuidance'
+import { Body, Button, Icon, Label, Signal, useColors } from '../components/ui'
+import { RadarHud } from '../components/RadarHud'
+import { useSatnav } from '../lib/satnav/useSatnav'
 import { useAppSettings } from '../lib/SettingsContext'
-import { announce, focusAccessible } from '../lib/accessibility'
-
-const actions = [
-  { label: 'Find a seat', icon: 'restaurant-outline', question: 'Which seat looks free?' },
-  { label: 'Find a product', icon: 'search-outline', question: null },
-  { label: 'Find checkout', icon: 'card-outline', question: 'Find the checkout' },
-  { label: 'What’s ahead?', icon: 'scan-outline', question: 'What is ahead?' },
-  { label: 'Read text', icon: 'text-outline', question: 'Read this' },
-] as const
-
-const phases = {
-  capturing: 'Capturing the view',
-  'loading-model': 'Preparing offline descriptions',
-  looking: 'Checking the captured view',
-  answering: 'Preparing the answer',
-  locating: 'Looking up your location',
-}
+import { formatWalkingDistance } from '../lib/navigation/geo'
+import type { SatnavMode } from '../lib/guidance/types'
 
 function CameraPreview(props: ViewProps) {
   const [Preview] = useState(() => requireNativeViewManager<ViewProps & { playing: boolean }>('TensorFoldPerception'))
   return <Preview {...props} playing />
 }
 
-export default function Guide() {
-  const guide = useGuidance()
-  const { setup } = useLocalSearchParams<{ setup?: string }>()
+const MODE_LABELS: Record<SatnavMode, string> = {
+  satnav: 'Full Satnav',
+  quiet: 'Quiet Haptics',
+  explore: 'Explore',
+}
+
+export default function SatnavGuide() {
+  const satnav = useSatnav()
   const { settings } = useAppSettings()
   const colors = useColors()
-  const [typing, setTyping] = useState<'question' | 'product' | null>(null)
-  const [question, setQuestion] = useState('')
-  const [showPreview, setShowPreview] = useState(false)
-  const openingScreen = useRef(false)
-  const typeButton = useRef<View>(null)
-  const startButton = useRef<View>(null)
-  const focusedAfterSetup = useRef(false)
-  const restoreFocus = useRef(false)
-  const active = guide.state === 'active' || guide.state === 'degraded'
-  const stopping = guide.state === 'stopping'
-  const starting = guide.state === 'starting'
-  const seen = guide.cameraReady
-  const busy = !!guide.questionPhase
-  const canAsk = active && seen && !busy
-  const voiceInput = guide.voice?.onDeviceRecognition === true
-  const modelState = guide.visionStatus.state
-  const modelAction = modelState === 'not-installed' ? 'Get offline descriptions'
-    : modelState === 'downloading' ? 'View download'
-    : modelState === 'error' ? 'Fix offline descriptions' : undefined
-  const depthReady = guide.snapshot?.depthState === 'ready'
-  const warning = active && guide.warning && Date.now() - guide.warning.observedAt <= 3_000 ? guide.warning : undefined
-  const phase = guide.questionPhase ? phases[guide.questionPhase] : guide.listening ? 'Listening. Ask your question.' : guide.speaking && active ? 'Speaking' : guide.handsFree && active ? 'Hands-free on' : undefined
-  const cameraStatus = stopping ? 'Stopping camera' : starting ? 'Starting camera' : seen ? 'Camera ready' : active ? 'Camera on' : 'Camera off'
-  const output = guide.voice?.route === 'headphones' ? 'Headphones' : guide.voice?.route === 'speaker' && settings.speakerFallback ? 'Phone speaker' : undefined
-  const reply = guide.lastReply
-  const checkingProduct = reply?.errand?.kind === 'item'
 
+  const [navSheetOpen, setNavSheetOpen] = useState(false)
+  const [destinationInput, setDestinationInput] = useState('')
+  const [placeNameInput, setPlaceNameInput] = useState('')
+  const [showCameraPreview, setShowCameraPreview] = useState(false)
+
+  const autoStartedRef = useRef(false)
+  const lastTapAtRef = useRef(0)
+  const tapTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const holdActiveRef = useRef(false)
+  const satnavRef = useRef(satnav)
+  satnavRef.current = satnav
+  const talkGestureRef = useRef(settings.talkGesture)
+  talkGestureRef.current = settings.talkGesture
+
+  // Auto-start live LiDAR + compass + haptics immediately on open (unless paused by user)
   useEffect(() => {
-    const target = typeButton.current
-    if (typing || busy || !restoreFocus.current || !target || !active) return
-    restoreFocus.current = false
-    focusAccessible(target)
-  }, [active, busy, typing])
-
-  useFocusEffect(useCallback(() => {
-    if (!setup || focusedAfterSetup.current || active || starting || stopping) return
-    const timer = setTimeout(() => {
-      if (!startButton.current) return
-      focusedAfterSetup.current = true
-      focusAccessible(startButton.current)
-      if (setup === 'downloaded') announce('Offline descriptions are downloaded and ready.')
-    }, 350)
-    return () => clearTimeout(timer)
-  }, [active, setup, starting, stopping]))
-
-  useEffect(() => {
-    if (!active) setShowPreview(false)
-  }, [active])
-
-  function closeTyping() {
-    restoreFocus.current = true
-    Keyboard.dismiss()
-    setTyping(null)
-    guide.setTextEntry(false)
-  }
-
-  function submitQuestion() {
-    const value = question.trim()
-    if (!value || !canAsk) return
-    setQuestion('')
-    void guide.ask(typing === 'product' ? `Find ${value}` : value)
-    closeTyping()
-  }
-
-  function openTyping(mode: 'question' | 'product' = 'question') {
-    guide.setTextEntry(true)
-    setTyping(mode)
-  }
-
-  function startCamera(handsFree: boolean) {
-    setTyping(null)
-    void guide.start(handsFree)
-  }
-
-  async function stopCamera(silent = false) {
-    restoreFocus.current = false
-    Keyboard.dismiss()
-    setTyping(null)
-    await guide.stop(silent)
-  }
-
-  async function openScreen(screen: '/settings' | '/offline') {
-    if (openingScreen.current || stopping) return
-    openingScreen.current = true
-    try {
-      if (active || starting || busy) await stopCamera(true)
-      router.push(screen)
-    } finally {
-      openingScreen.current = false
+    if (autoStartedRef.current) return
+    autoStartedRef.current = true
+    if (satnav.state === 'idle' && Platform.OS !== 'web') {
+      void satnav.start()
     }
-  }
+  }, [satnav])
 
-  const stopControl = active || starting || stopping ? <Button
-    stop
-    icon="stop-circle-outline"
-    label="Stop camera"
-    hint="Turns off the camera and microphone."
-    busy={stopping}
-    onPress={() => void stopCamera()}
-  /> : undefined
+  useEffect(() => {
+    return () => {
+      if (tapTimerRef.current) clearTimeout(tapTimerRef.current)
+    }
+  }, [])
 
-  return <Screen footer={stopControl}>
-    <TopBar settings={() => void openScreen('/settings')} settingsDisabled={stopping} />
+  const openSettings = useCallback(() => {
+    router.push('/settings')
+  }, [])
 
-    <View style={[styles.welcome, { backgroundColor: colors.raised }]}>
-      <View style={styles.statusRow}>
-        <Signal live={Platform.OS !== 'ios' && !guide.voice?.offlineSpeech} tone={seen ? 'ready' : 'quiet'}>{cameraStatus}</Signal>
-        {active && output && <View style={styles.output}><Icon name={guide.voice?.route === 'headphones' ? 'headset-outline' : 'volume-medium-outline'} color={colors.muted} size={18} /><Text style={[styles.outputText, { color: colors.muted }]}>{output}</Text></View>}
-      </View>
-      <Heading editorial focusOnEntry={!setup}>{active ? 'How can I help?' : settings.companionName ? `Hello, ${settings.companionName}` : 'Explore nearby'}</Heading>
-      <Body muted>{guide.state === 'error' ? guide.statusMessage : active ? 'Point your phone at what you want to ask about.' : 'Hear what’s nearby, find a seat or read something aloud.'}</Body>
-      {active && !seen && !busy && <Body muted>{guide.cameraHint ?? 'Getting a clear view. Hold the phone steady for a moment.'}</Body>}
-      {guide.voiceNotice && <Body muted live>{guide.voiceNotice}</Body>}
-      {!busy && guide.voiceModelMissing && Platform.OS === 'android' && Platform.Version >= 34 &&
-        <Button secondary label="Download offline speech" icon="download-outline" hint="Uses an internet connection once to prepare voice input." busy={guide.speechDownloadPending} onPress={() => void guide.downloadOfflineSpeech()} />}
+  const handleSubmitDestination = useCallback(() => {
+    const target = destinationInput.trim()
+    if (!target) return
+    Keyboard.dismiss()
+    setDestinationInput('')
+    setNavSheetOpen(false)
+    void satnav.navigateToDestination(target)
+  }, [destinationInput, satnav])
 
-      {phase && <Text aria-live={Platform.OS === 'ios' ? undefined : 'polite'} style={[styles.phase, { color: colors.text }]}>{phase}</Text>}
-      {busy ? <Button secondary label="Cancel question" icon="close-outline" onPress={() => void guide.stopSpeech()} /> : !active ? <>
-        {voiceInput && <Button hostRef={startButton} label="Start hands-free" icon="mic-outline" hint="Turns on the camera. The microphone listens again after each reply." busy={guide.startPending || stopping} onPress={() => startCamera(true)} />}
-        <Button
-          hostRef={voiceInput ? undefined : startButton}
-          label={guide.state === 'error' ? 'Retry camera' : 'Start camera'}
-          icon="camera-outline"
-          secondary={voiceInput}
-          hint="The microphone stays off until you ask by voice."
-          busy={!voiceInput && (guide.startPending || stopping)}
-          disabled={voiceInput && (guide.startPending || stopping)}
-          onPress={() => startCamera(false)}
-        />
-        {guide.state === 'error' && guide.cameraPermissionBlocked && Platform.OS !== 'web' && <Button secondary label="Open phone settings" icon="settings-outline" hint="Find NearDAR and allow camera access." onPress={() => void Linking.openSettings().catch(() => {})} />}
-      </> : typing ? <View style={styles.composer}>
-          <Label>{typing === 'product' ? 'Find a product' : 'Type a question'}</Label>
-          <TextInput
-            accessibilityLabel={typing === 'product' ? 'Product name' : 'Question about this view'}
-            autoFocus
-            returnKeyType="send"
-            onSubmitEditing={submitQuestion}
-            onKeyPress={({ nativeEvent }) => { if (nativeEvent.key === 'Escape') closeTyping() }}
-            maxLength={360}
-            value={question}
-            onChangeText={setQuestion}
-            placeholder={typing === 'product' ? 'Baked beans' : 'What’s on my left?'}
-            placeholderTextColor={colors.muted}
-            style={[styles.input, { color: colors.text, backgroundColor: colors.panel, borderColor: colors.border }]}
+  const handleSavePlace = useCallback(() => {
+    const label = placeNameInput.trim()
+    if (!label) return
+    Keyboard.dismiss()
+    setPlaceNameInput('')
+    void satnav.saveCurrentPlace(label)
+  }, [placeNameInput, satnav])
+
+  // Eyes-free gesture recognizer:
+  // Swipe left/right = switch mode, Swipe up = scan ahead, Swipe down = orient me,
+  // Double-tap = pause/resume, Tap (or Hold) = talk with barge-in.
+  const panResponder = useMemo(() => PanResponder.create({
+    onStartShouldSetPanResponder: () => true,
+    onMoveShouldSetPanResponder: (_, gesture) => Math.abs(gesture.dx) > 18 || Math.abs(gesture.dy) > 18,
+    onPanResponderGrant: () => {
+      if (talkGestureRef.current === 'hold') {
+        holdActiveRef.current = true
+        void satnavRef.current.beginTalk()
+      }
+    },
+    onPanResponderRelease: (_, gesture) => {
+      if (holdActiveRef.current) {
+        holdActiveRef.current = false
+        void satnavRef.current.endTalk()
+        return
+      }
+      // Horizontal swipe switches guidance mode
+      if (Math.abs(gesture.dx) >= 70 && Math.abs(gesture.dx) > Math.abs(gesture.dy) * 1.4) {
+        if (tapTimerRef.current) {
+          clearTimeout(tapTimerRef.current)
+          tapTimerRef.current = null
+        }
+        void satnavRef.current.cycleMode(gesture.dx > 0 ? 1 : -1)
+        return
+      }
+      // Vertical swipe up -> instant TensorFold scan ahead (zero-talk)
+      if (gesture.dy <= -75 && Math.abs(gesture.dy) > Math.abs(gesture.dx) * 1.4) {
+        if (tapTimerRef.current) {
+          clearTimeout(tapTimerRef.current)
+          tapTimerRef.current = null
+        }
+        void satnavRef.current.quickScanAhead()
+        return
+      }
+      // Vertical swipe down -> calm street, heading, and surroundings orientation (zero-talk)
+      if (gesture.dy >= 75 && Math.abs(gesture.dy) > Math.abs(gesture.dx) * 1.4) {
+        if (tapTimerRef.current) {
+          clearTimeout(tapTimerRef.current)
+          tapTimerRef.current = null
+        }
+        void satnavRef.current.orientMe(true)
+        return
+      }
+      // Tap / Double-tap disambiguation
+      if (Math.abs(gesture.dx) < 20 && Math.abs(gesture.dy) < 20) {
+        const now = Date.now()
+        if (now - lastTapAtRef.current <= 300) {
+          lastTapAtRef.current = 0
+          if (tapTimerRef.current) {
+            clearTimeout(tapTimerRef.current)
+            tapTimerRef.current = null
+          }
+          void satnavRef.current.togglePause()
+        } else {
+          lastTapAtRef.current = now
+          tapTimerRef.current = setTimeout(() => {
+            tapTimerRef.current = null
+            void satnavRef.current.beginTalk()
+          }, 260)
+        }
+      }
+    },
+    onPanResponderTerminate: () => {
+      if (holdActiveRef.current) {
+        holdActiveRef.current = false
+        void satnavRef.current.endTalk()
+      }
+    },
+  }), [])
+
+  const route = satnav.routeProgress
+  const routeActive = Boolean(route && route.active && !route.arrived)
+  const headphones = satnav.voice?.route === 'headphones'
+
+  const primaryCaption = satnav.listening
+    ? (satnav.partialTranscript ? `“${satnav.partialTranscript}”` : 'Listening… ask anything or say a destination.')
+    : satnav.thinking
+      ? (satnav.lastReply?.text || 'Looking at what is ahead…')
+      : satnav.lastReply?.text || satnav.fused.summary || satnav.statusMessage
+
+  const canvasAccessibilityLabel = [
+    satnav.active ? `${MODE_LABELS[satnav.mode]} active.` : 'Satnav paused.',
+    routeActive && route ? `Route to ${route.route.destinationName}, ${formatWalkingDistance(route.remainingDistanceMeters, settings.stepLengthMeters)} left. ${route.currentStep.instruction}.` : '',
+    satnav.fused.summary,
+    satnav.lastReply?.text ? `Last message: ${satnav.lastReply.text}` : '',
+  ].filter(Boolean).join(' ')
+
+  return (
+    <SafeAreaView style={[styles.safe, { backgroundColor: colors.background }]}>
+      <View style={styles.shell}>
+        {/* Compact Top Bar */}
+        <View style={styles.topBar}>
+          <View style={styles.topStatus}>
+            <Signal tone={satnav.active ? (satnav.fused.standby ? 'quiet' : satnav.cameraReady ? 'ready' : 'attention') : 'quiet'}>
+              {satnav.active ? (satnav.fused.standby ? 'Standby' : satnav.cameraReady ? 'LiDAR Live' : 'Starting') : 'Paused'}
+            </Signal>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={`Guidance mode: ${MODE_LABELS[satnav.mode]}. Activate to switch mode.`}
+              onPress={() => void satnav.cycleMode(1)}
+              style={[styles.pill, { backgroundColor: colors.raised, borderColor: colors.border }]}
+            >
+              <Text style={[styles.pillText, { color: colors.text }]}>{MODE_LABELS[satnav.mode]}</Text>
+            </Pressable>
+            {headphones && settings.spatialBeacon && (
+              <View accessible accessibilityLabel="3D headphone spatial beacon active" style={[styles.pill, { backgroundColor: colors.panel, borderColor: colors.divider }]}>
+                <Icon name="headset-outline" size={14} color={colors.accent} />
+                <Text style={[styles.pillText, { color: colors.accent }]}>3D</Text>
+              </View>
+            )}
+          </View>
+
+          <Button compact secondary icon="settings-outline" label="Settings" onPress={openSettings} />
+        </View>
+
+        {/* Active Route Maneuver Banner */}
+        {routeActive && route && (
+          <View style={[styles.routeCard, { backgroundColor: colors.raised, borderColor: colors.accent }]}>
+            <View style={styles.routeHeader}>
+              <View style={styles.routeMeta}>
+                <Text numberOfLines={1} style={[styles.routeDest, { color: colors.text }]}>
+                  {route.route.destinationName}
+                </Text>
+                <Text style={[styles.routeDist, { color: colors.accent }]}>
+                  {formatWalkingDistance(route.remainingDistanceMeters, settings.stepLengthMeters)} left
+                  {route.route.source !== 'mapkit' ? ' · Offline' : ''}
+                </Text>
+              </View>
+              <Button compact secondary label="End" onPress={() => void satnav.cancelRoute()} />
+            </View>
+            <Text style={[styles.routeStep, { color: colors.text }]}>
+              {route.offRoute ? 'Off route — follow the beacon to rejoin.' : route.currentStep.instruction}
+            </Text>
+          </View>
+        )}
+
+        {/* Full-Screen Eyes-Free Gesture Canvas */}
+        <View
+          {...panResponder.panHandlers}
+          accessible
+          accessibilityRole="button"
+          accessibilityLabel={canvasAccessibilityLabel}
+          accessibilityHint={
+            settings.talkGesture === 'hold'
+              ? 'Press and hold anywhere to talk. Two-finger double-tap to pause or resume.'
+              : 'Tap anywhere to talk. Swipe up to scan ahead. Swipe down to orient yourself. Double-tap to pause or resume. Swipe left or right to switch mode.'
+          }
+          accessibilityActions={[
+            { name: 'activate', label: 'Talk to NearDar' },
+            { name: 'scanAhead', label: 'Scan ahead now' },
+            { name: 'orientMe', label: 'Orient me — where am I and what is around me' },
+            { name: 'magicTap', label: satnav.active ? 'Pause satnav' : 'Resume satnav' },
+            { name: 'cycleMode', label: 'Switch guidance mode' },
+            { name: 'checkPath', label: 'Check path clearance' },
+            { name: 'repeat', label: 'Repeat last message' },
+          ]}
+          onAccessibilityAction={({ nativeEvent }) => {
+            switch (nativeEvent.actionName) {
+              case 'activate': void satnav.beginTalk(); break
+              case 'scanAhead': void satnav.quickScanAhead(); break
+              case 'orientMe': void satnav.orientMe(true); break
+              case 'magicTap': void satnav.togglePause(); break
+              case 'cycleMode': void satnav.cycleMode(1); break
+              case 'checkPath': void satnav.submitCommand('Which way is open?'); break
+              case 'repeat': void satnav.submitCommand('Repeat'); break
+            }
+          }}
+          style={[
+            styles.canvas,
+            {
+              backgroundColor: satnav.listening ? colors.raised : colors.panel,
+              borderColor: satnav.listening ? colors.accent : satnav.fused.primaryHazard?.severity === 'urgent' ? colors.stop : colors.divider,
+            },
+          ]}
+        >
+          <RadarHud
+            corridor={satnav.snapshot?.corridor}
+            snapshot={satnav.snapshot}
+            fused={satnav.fused}
+            headingDegrees={satnav.headingDegrees}
+            active={satnav.active}
           />
-          <View style={styles.actions}>
-            <Button compact label={typing === 'product' ? 'Find product' : 'Ask'} icon="arrow-up" disabled={!canAsk || !question.trim()} onPress={submitQuestion} />
-            <Button compact secondary label="Cancel typing" onPress={closeTyping} />
+
+          <View style={styles.captionZone}>
+            <View style={styles.stateChip}>
+              <Icon
+                name={satnav.listening ? 'mic' : satnav.thinking ? 'sparkles' : satnav.speaking ? 'volume-high' : 'hand-left-outline'}
+                size={18}
+                color={satnav.listening ? colors.accent : colors.muted}
+              />
+              <Text style={[styles.stateChipText, { color: satnav.listening ? colors.accent : colors.muted }]}>
+                {satnav.listening
+                  ? 'Listening (tap again to finish)'
+                  : satnav.thinking
+                    ? (satnav.usingTensorFoldEngine ? 'TensorFold analyzing view…' : 'On-device vision analyzing…')
+                    : satnav.speaking
+                      ? 'Speaking (tap to interrupt)'
+                      : satnav.fused.standby
+                        ? 'Camera lowered · Tap to talk'
+                        : settings.talkGesture === 'hold'
+                          ? 'Hold anywhere to talk · Swipe for mode'
+                          : 'Tap to talk · Swipe up scan · Down orient'}
+              </Text>
+            </View>
+
+            <Text style={[styles.captionText, { color: colors.text }]} numberOfLines={5}>
+              {primaryCaption}
+            </Text>
+
+            {satnav.voiceNotice && (
+              <Text style={[styles.noticeText, { color: colors.warning }]}>{satnav.voiceNotice}</Text>
+            )}
           </View>
-        </View> : <>
-          {voiceInput && (guide.listening || guide.handsFree ? <Button secondary label="Stop listening" icon="mic-off-outline" hint="Turns off the microphone and keeps the camera on." onPress={guide.stopListeningInput} />
-            : <Button label="Ask by voice" icon="mic-outline" hint="Try saying Help me find a seat." disabled={!canAsk} onPress={() => void guide.ask()} />)}
-          <View style={voiceInput ? styles.actions : undefined}>
-            <Button compact={voiceInput} hostRef={typeButton} secondary={voiceInput} label="Type a question" icon="create-outline" disabled={!canAsk} onPress={() => openTyping()} />
-            {voiceInput && !guide.handsFree && !guide.listening && <Button compact secondary label="Enable hands-free" icon="mic-outline" disabled={!canAsk} onPress={guide.enableHandsFree} />}
-          </View>
-          {guide.handsFree && <Body muted>Say “What can I ask?” for examples.</Body>}
-        </>}
-    </View>
 
-    {active && guide.cameraPreviewAvailable && <View style={styles.previewControls}>
-      <Button compact secondary label={showPreview ? 'Hide camera preview' : 'Show camera preview'} expanded={showPreview} icon="camera-outline" onPress={() => setShowPreview(!showPreview)} />
-      {showPreview && <CameraPreview accessibilityElementsHidden aria-hidden importantForAccessibility="no-hide-descendants" pointerEvents="none" style={styles.cameraPreview} />}
-    </View>}
+          {showCameraPreview && satnav.active && satnav.cameraPreviewAvailable && (
+            <CameraPreview
+              accessibilityElementsHidden
+              aria-hidden
+              importantForAccessibility="no-hide-descendants"
+              pointerEvents="none"
+              style={styles.cameraPreview}
+            />
+          )}
+        </View>
 
-    {warning && <View style={[styles.warning, { backgroundColor: colors.warningSurface }]}>
-      <Icon name="warning-outline" color={colors.warning} />
-      <Text style={[styles.warningText, { color: colors.warning }]}>{warning.message}</Text>
-    </View>}
+        {/* Permission or Vision Download Helper Row (only when needed) */}
+        {satnav.cameraPermissionBlocked && Platform.OS !== 'web' && (
+          <Button secondary icon="settings-outline" label="Allow Camera in iOS Settings" onPress={() => void Linking.openSettings().catch(() => {})} />
+        )}
+        {satnav.vision?.available && satnav.visionStatus.state === 'not-installed' && (
+          <Button
+            compact
+            secondary
+            icon="download-outline"
+            label={satnav.usingTensorFoldEngine ? 'Download TensorFold Mobile (1.5 GB)' : 'Download offline vision model (363 MB)'}
+            onPress={() => router.push('/offline')}
+          />
+        )}
+        {satnav.voiceModelMissing && Platform.OS === 'android' && (
+          <Button compact secondary icon="download-outline" label="Download offline speech" busy={satnav.speechDownloadPending} onPress={() => void satnav.downloadOfflineSpeech()} />
+        )}
 
-    {reply && <StatusCard title="Last answer">
-      {reply.question && <Body muted>You asked “{reply.question}”</Body>}
-      <Text aria-live={Platform.OS !== 'ios' && !guide.voice?.offlineSpeech ? 'polite' : undefined} style={[styles.answer, { color: colors.text }]}>{reply.text}</Text>
-      {reply.detail && <Body muted>{reply.detail}</Body>}
-      {guide.alignment && <Body muted live={Platform.OS !== 'ios' && !guide.voice?.offlineSpeech}>{guide.alignment.message}</Body>}
-      {guide.alignment?.active ? <Button secondary label="Stop alignment" icon="close-outline" onPress={() => void guide.cancelAlignment()} />
-        : guide.state === 'active' && depthReady && reply.seatTarget && Date.now() - reply.seatTarget.observedAt <= 45_000 && <Button secondary label="Align to the seat" icon="compass-outline" disabled={busy || !!typing} hint="Stay where you are. Turn your phone slowly until you feel a tap." onPress={() => void guide.alignToSeat()} />}
-      <View style={styles.actions}>
-        {reply.question && (reply.source === 'location' || canAsk) && <Button compact secondary label="Check again" icon="refresh-outline" disabled={busy || starting || stopping || !!typing} hint={reply.source === 'view' ? 'Takes a fresh camera image for the same question.' : 'Looks up your location again.'} onPress={() => void guide.checkAgain()} />}
-        {active && checkingProduct && <Button compact secondary label="Check the label" icon="text-outline" disabled={!canAsk || !!typing} hint="Hold one product label close to the camera." onPress={() => void guide.checkLabel()} />}
-        <Button compact secondary label="Repeat answer" icon="volume-medium-outline" disabled={busy} onPress={() => void guide.repeat()} />
-        {guide.speaking && <Button compact secondary label="Stop speech" icon="stop-outline" onPress={() => void guide.stopSpeech()} />}
-      </View>
-    </StatusCard>}
+        {/* Minimal 3-Button Bottom Dock */}
+        <View style={[styles.dock, { borderTopColor: colors.divider }]}>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Navigate to a destination or saved place"
+            onPress={() => setNavSheetOpen(true)}
+            style={({ pressed }) => [styles.dockBtn, { backgroundColor: colors.panel, borderColor: colors.border }, pressed && styles.pressed]}
+          >
+            <Icon name="navigate-outline" size={24} color={colors.text} />
+            <Text style={[styles.dockLabel, { color: colors.text }]}>Navigate</Text>
+          </Pressable>
 
-    {!!guide.shoppingList.length && <StatusCard title="Shopping list">
-      {guide.shoppingList.map((item) => <Button row secondary key={item} label={item} icon="search-outline" disabled={!canAsk || !!typing} hint="Look for this item in the camera view." onPress={() => void guide.ask(`Find ${item}`)} />)}
-      <Button compact secondary label="Clear shopping list" disabled={busy || !!typing} onPress={() => void guide.ask('Clear shopping list')} />
-    </StatusCard>}
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={satnav.listening ? 'Stop listening and send' : 'Talk to NearDar'}
+            onPress={() => { if (settings.talkGesture === 'tap') void satnav.beginTalk() }}
+            onPressIn={() => { if (settings.talkGesture === 'hold') void satnav.beginTalk() }}
+            onPressOut={() => { if (settings.talkGesture === 'hold') void satnav.endTalk() }}
+            style={({ pressed }) => [
+              styles.dockPrimary,
+              { backgroundColor: satnav.listening ? colors.stop : colors.accent },
+              pressed && styles.pressed,
+            ]}
+          >
+            <Icon name={satnav.listening ? 'mic' : 'mic-outline'} size={28} color={colors.ink} />
+            <Text style={[styles.dockPrimaryLabel, { color: colors.ink }]}>
+              {satnav.listening ? 'Listening' : 'Talk'}
+            </Text>
+          </Pressable>
 
-    <View style={styles.quick}>
-      <Label>Quick questions</Label>
-      <View style={[styles.list, { backgroundColor: colors.panel }]}>
-        {active && actions.map(({ label, icon, question: prompt }, index) => <View key={label} style={index === 0 ? undefined : { borderTopWidth: 1, borderTopColor: colors.divider }}>
-          <Button row secondary label={label} icon={icon} disabled={!canAsk || !!typing} onPress={() => prompt ? void guide.ask(prompt) : openTyping('product')} />
-        </View>)}
-        <View style={active ? { borderTopWidth: 1, borderTopColor: colors.divider } : undefined}>
-          <Button row secondary label="Where am I?" icon="location-outline" hint="Reads your approximate location. Your phone may use the network to find an address." disabled={busy || starting || stopping || !!typing} onPress={() => void guide.ask('Where am I?')} />
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={satnav.active ? 'Pause satnav and sensors' : 'Resume satnav and sensors'}
+            onPress={() => void satnav.togglePause()}
+            style={({ pressed }) => [
+              styles.dockBtn,
+              { backgroundColor: satnav.active ? colors.stopSurface : colors.raised, borderColor: satnav.active ? colors.stop : colors.accent },
+              pressed && styles.pressed,
+            ]}
+          >
+            <Icon name={satnav.active ? 'pause-circle-outline' : 'play-circle-outline'} size={24} color={satnav.active ? colors.stop : colors.accent} />
+            <Text style={[styles.dockLabel, { color: satnav.active ? colors.stop : colors.accent }]}>
+              {satnav.active ? 'Pause' : 'Start'}
+            </Text>
+          </Pressable>
         </View>
       </View>
-      {active && !depthReady && seen && <Body muted>Descriptions can include direction. Distance and step estimates are unavailable.</Body>}
-    </View>
 
-    {modelState === 'loading' && <Signal live>Preparing offline descriptions</Signal>}
-    {modelAction && guide.vision?.available && <Button compact secondary icon="download-outline" label={modelAction} onPress={() => void openScreen('/offline')} />}
-  </Screen>
+      {/* Accessible Destination & Offline Places Sheet */}
+      <Modal
+        visible={navSheetOpen}
+        animationType="slide"
+        presentationStyle="pageSheet"
+        onRequestClose={() => setNavSheetOpen(false)}
+      >
+        <SafeAreaView style={[styles.modalSafe, { backgroundColor: colors.background }]}>
+          <View style={styles.modalHeader}>
+            <Label>Navigate</Label>
+            <Button compact secondary label="Close" onPress={() => setNavSheetOpen(false)} />
+          </View>
+          <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={styles.modalBody}>
+            <View style={[styles.modalCard, { backgroundColor: colors.panel, borderColor: colors.divider }]}>
+              <Label>Go to a place</Label>
+              <Body muted>Type a destination or say “Take me to…” anytime from the main screen.</Body>
+              <TextInput
+                accessibilityLabel="Destination address or place name"
+                value={destinationInput}
+                onChangeText={setDestinationInput}
+                onSubmitEditing={handleSubmitDestination}
+                returnKeyType="go"
+                placeholder="Nearest pharmacy, Costa Coffee, Home…"
+                placeholderTextColor={colors.muted}
+                style={[styles.input, { color: colors.text, borderColor: colors.border, backgroundColor: colors.background }]}
+              />
+              <Button icon="navigate-outline" label="Start Walking Route" disabled={!destinationInput.trim()} onPress={handleSubmitDestination} />
+            </View>
+
+            {/* Quick Orientation & Offline Return */}
+            <View style={[styles.modalCard, { backgroundColor: colors.panel, borderColor: colors.divider }]}>
+              <Label>Get Your Bearings</Label>
+              <Body muted>
+                Hear your street address, compass heading, and what is immediately around you—or trace your breadcrumbs back offline.
+              </Body>
+              <Button
+                secondary
+                icon="compass-outline"
+                label="Orient me (I’m lost)"
+                onPress={() => {
+                  setNavSheetOpen(false)
+                  void satnav.orientMe(true)
+                }}
+              />
+              <Button
+                secondary
+                icon="return-up-back-outline"
+                label={satnav.breadcrumbCount >= 2 ? `Take me back (${satnav.breadcrumbCount} breadcrumbs)` : 'Take me back to where I started'}
+                disabled={satnav.breadcrumbCount < 2}
+                onPress={() => {
+                  setNavSheetOpen(false)
+                  void satnav.navigateBack()
+                }}
+              />
+            </View>
+
+            {/* Saved Places (Offline-ready) */}
+            <View style={[styles.modalCard, { backgroundColor: colors.panel, borderColor: colors.divider }]}>
+              <Label>Saved Places (Works Offline)</Label>
+              {satnav.savedPlaces.length === 0 ? (
+                <Body muted>No saved places yet. Save where you are standing now for offline beacon and route guidance.</Body>
+              ) : (
+                satnav.savedPlaces.map((place) => (
+                  <Button
+                    key={place.id}
+                    row
+                    secondary
+                    icon="location-outline"
+                    label={place.name}
+                    onPress={() => {
+                      setNavSheetOpen(false)
+                      void satnav.navigateToSavedPlace(place)
+                    }}
+                  />
+                ))
+              )}
+              <TextInput
+                accessibilityLabel="Name for current location"
+                value={placeNameInput}
+                onChangeText={setPlaceNameInput}
+                onSubmitEditing={handleSavePlace}
+                placeholder="Save current spot as (e.g. Home)"
+                placeholderTextColor={colors.muted}
+                style={[styles.input, { color: colors.text, borderColor: colors.border, backgroundColor: colors.background }]}
+              />
+              <Button compact secondary icon="bookmark-outline" label="Save Current Location" disabled={!placeNameInput.trim()} onPress={handleSavePlace} />
+            </View>
+
+            {satnav.active && satnav.cameraPreviewAvailable && (
+              <Button
+                compact
+                secondary
+                icon="eye-outline"
+                label={showCameraPreview ? 'Hide sighted camera preview' : 'Show sighted camera preview'}
+                onPress={() => setShowCameraPreview(!showCameraPreview)}
+              />
+            )}
+          </ScrollView>
+        </SafeAreaView>
+      </Modal>
+    </SafeAreaView>
+  )
 }
 
 const styles = StyleSheet.create({
-  previewControls: { gap: 10 },
-  cameraPreview: { width: '100%', aspectRatio: 4 / 3, overflow: 'hidden', borderRadius: 16, backgroundColor: '#000' },
-  welcome: { padding: 18, gap: 13, borderRadius: 25 },
-  statusRow: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
-  output: { flexDirection: 'row', alignItems: 'center', gap: 5 },
-  outputText: { fontSize: 15, fontWeight: '600', flexShrink: 1 },
-  phase: { fontSize: 17, lineHeight: 24, fontWeight: '700' },
-  composer: { gap: 10 },
-  actions: { flexDirection: 'row', flexWrap: 'wrap', gap: 9 },
-  input: { minHeight: 56, fontSize: 19, padding: 13, borderRadius: 13, borderWidth: 1.5 },
-  quick: { gap: 11 },
-  list: { padding: 4, borderRadius: 19 },
-  answer: { fontSize: 24, lineHeight: 32, fontWeight: '600' },
-  warning: { borderRadius: 15, padding: 13, flexDirection: 'row', alignItems: 'center', gap: 10 },
-  warningText: { fontSize: 17, lineHeight: 25, flex: 1 },
+  safe: { flex: 1 },
+  shell: { flex: 1, width: '100%', maxWidth: 560, alignSelf: 'center', paddingHorizontal: 16, paddingTop: 8, paddingBottom: 10, gap: 12 },
+  topBar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
+  topStatus: { flexDirection: 'row', alignItems: 'center', gap: 8, flexWrap: 'wrap', flex: 1 },
+  pill: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 10, paddingVertical: 6, borderRadius: 12, borderWidth: 1 },
+  pillText: { fontSize: 13, fontWeight: '700' },
+  routeCard: { borderRadius: 18, borderWidth: 1.5, padding: 14, gap: 6 },
+  routeHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10 },
+  routeMeta: { flex: 1, gap: 2 },
+  routeDest: { fontSize: 19, fontWeight: '800' },
+  routeDist: { fontSize: 14, fontWeight: '700' },
+  routeStep: { fontSize: 17, lineHeight: 23, fontWeight: '600' },
+  canvas: { flex: 1, borderRadius: 26, borderWidth: 2, padding: 16, justifyContent: 'space-between', gap: 14 },
+  captionZone: { flex: 1, justifyContent: 'center', gap: 10 },
+  stateChip: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  stateChipText: { fontSize: 14, fontWeight: '700' },
+  captionText: { fontSize: 23, lineHeight: 31, fontWeight: '700' },
+  noticeText: { fontSize: 15, lineHeight: 21, fontWeight: '600' },
+  cameraPreview: { width: '100%', height: 140, borderRadius: 14, overflow: 'hidden', backgroundColor: '#000' },
+  dock: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingTop: 10, borderTopWidth: 1 },
+  dockBtn: { flex: 1, minHeight: 68, borderRadius: 18, borderWidth: 1.5, alignItems: 'center', justifyContent: 'center', gap: 4, paddingHorizontal: 8 },
+  dockPrimary: { flex: 1.35, minHeight: 72, borderRadius: 22, alignItems: 'center', justifyContent: 'center', gap: 3, paddingHorizontal: 10 },
+  dockLabel: { fontSize: 14, fontWeight: '700' },
+  dockPrimaryLabel: { fontSize: 16, fontWeight: '800' },
+  pressed: { opacity: 0.8 },
+  modalSafe: { flex: 1 },
+  modalHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 20, paddingVertical: 14 },
+  modalBody: { paddingHorizontal: 20, paddingBottom: 32, gap: 16 },
+  modalCard: { borderRadius: 20, borderWidth: 1, padding: 16, gap: 12 },
+  input: { minHeight: 54, fontSize: 18, paddingHorizontal: 14, borderRadius: 14, borderWidth: 1.5 },
 })

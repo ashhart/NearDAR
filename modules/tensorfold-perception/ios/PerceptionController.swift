@@ -15,13 +15,18 @@ final class PerceptionController: NSObject, ARSessionDelegate {
   private var frameClock = PerceptionFrameClock()
   private var imageOrientation = CGImagePropertyOrientation.right
   private let meshes = MeshStore()
+  private let approachTracker = ApproachTracker()
+  private var headingAligned = false
+  private var detectedFloorY: Float?
   private var active = false
   private var latestSnapshot: [String: Any]?
   private var latestPeople: [[String: Any]] = []
+  private var latestAnimals: [[String: Any]] = []
   private var lastPersonScanFrameTime: Double?
   private var personTaskRunning = false
   private var lastPersonRequestUptime = 0.0
   private var personSequence = 0
+  private var animalSequence = 0
   private var lastEmissionUptime = 0.0
   private var captureInProgress = false
   private var latestCaptureURI: String?
@@ -95,6 +100,7 @@ final class PerceptionController: NSObject, ARSessionDelegate {
         let orientation = PerceptionVision.interfaceOrientation()
         let configuration = ARWorldTrackingConfiguration()
         configuration.planeDetection = [.horizontal, .vertical]
+        configuration.worldAlignment = .gravityAndHeading
         if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
           configuration.frameSemantics.insert(.sceneDepth)
         }
@@ -107,11 +113,15 @@ final class PerceptionController: NSObject, ARSessionDelegate {
           self.settings = nextSettings
           self.frameClock = PerceptionFrameClock()
           self.imageOrientation = orientation
+          self.headingAligned = true
+          self.detectedFloorY = nil
           self.active = true
           self.latestSnapshot = nil
           self.latestPeople = []
+          self.latestAnimals = []
           self.lastPersonScanFrameTime = nil
           self.meshes.clear()
+          self.approachTracker.reset()
           self.startStaleTimer()
           var result: [String: Any] = ["active": true, "capabilities": self.capabilities()]
           if let length = self.settings.stepLength { result["stepLengthMeters"] = length }
@@ -152,6 +162,9 @@ final class PerceptionController: NSObject, ARSessionDelegate {
       lastCaptureAt = nil
       PerceptionVision.pruneCaptures(directory: captureDirectory)
       meshes.clear()
+      approachTracker.reset()
+      detectedFloorY = nil
+      headingAligned = false
     }
   }
 
@@ -202,14 +215,19 @@ final class PerceptionController: NSObject, ARSessionDelegate {
     captureInProgress = true
     visionQueue.async {
       var people: [[String: Any]] = []
+      var animals: [[String: Any]] = []
       var text: [[String: Any]] = []
       var captureError: PerceptionError?
       var personScanSucceeded = true
       if detectPeople {
-        do { people = try PerceptionVision.people(frame: frame, orientation: orientation, timestamp: timestamp, settings: settings) }
+        do {
+          let detected = try PerceptionVision.peopleAndAnimals(frame: frame, orientation: orientation, timestamp: timestamp, settings: settings)
+          people = detected.people
+          animals = detected.animals
+        }
         catch {
           personScanSucceeded = false
-          self.report("E_VISION", "Person detection failed for this capture: \(error.localizedDescription)", recoverable: true)
+          self.report("E_VISION", "Person and animal detection failed for this capture: \(error.localizedDescription)", recoverable: true)
         }
       }
       if recognizeText {
@@ -230,7 +248,7 @@ final class PerceptionController: NSObject, ARSessionDelegate {
           completion(.failure(PerceptionError("E_SESSION_INACTIVE", "The perception session stopped during capture.")))
           return
         }
-        if detectPeople, personScanSucceeded { self.updatePeople(people, frameTime: frame.timestamp) }
+        if detectPeople, personScanSucceeded { self.updateVisionEntities(people: people, animals: animals, frameTime: frame.timestamp) }
         let snapshot = self.makeSnapshot(frame: frame, mode: "capture", ocr: text, image: image,
           sampledAt: sampledAt, sameFramePersonScan: detectPeople && personScanSucceeded)
         self.captureInProgress = false
@@ -310,6 +328,8 @@ final class PerceptionController: NSObject, ARSessionDelegate {
     lastPersonRequestUptime = 0
     lastPersonScanFrameTime = nil
     latestPeople = []
+    latestAnimals = []
+    approachTracker.reset()
     clearSeatTargets(result: result)
   }
 
@@ -394,11 +414,31 @@ final class PerceptionController: NSObject, ARSessionDelegate {
   }
 
   func session(_ session: ARSession, didAdd anchors: [ARAnchor]) {
-    for case let anchor as ARMeshAnchor in anchors { meshes.update(anchor) }
+    for anchor in anchors {
+      if let mesh = anchor as? ARMeshAnchor { meshes.update(mesh) }
+      else if let plane = anchor as? ARPlaneAnchor { updateFloorPlane(plane) }
+    }
   }
 
   func session(_ session: ARSession, didUpdate anchors: [ARAnchor]) {
-    for case let anchor as ARMeshAnchor in anchors { meshes.update(anchor) }
+    for anchor in anchors {
+      if let mesh = anchor as? ARMeshAnchor { meshes.update(mesh) }
+      else if let plane = anchor as? ARPlaneAnchor { updateFloorPlane(plane) }
+    }
+  }
+
+  private func updateFloorPlane(_ plane: ARPlaneAnchor) {
+    guard plane.alignment == .horizontal else { return }
+    let y = plane.transform.columns.3.y
+    if plane.classification == .floor {
+      detectedFloorY = y
+    } else if let cam = session.currentFrame?.camera.transform.columns.3.y, y < cam - 0.65 {
+      if let current = detectedFloorY {
+        if y < current { detectedFloorY = y }
+      } else {
+        detectedFloorY = y
+      }
+    }
   }
 
   func session(_ session: ARSession, didRemove anchors: [ARAnchor]) {
@@ -440,22 +480,59 @@ final class PerceptionController: NSObject, ARSessionDelegate {
     latestSnapshot = snapshot
     emit?("onSnapshot", snapshot)
     emit?("onStatus", status(snapshot))
-    if snapshot["depthState"] as? String == "available", isNormalTracking(frame.camera.trackingState) {
-      let obstacles = (snapshot["obstacles"] as? [[String: Any]] ?? []).filter { ($0["nearestDistanceMeters"] as? Double ?? .infinity) <= settings.warningDistance }
-      if let obstacle = obstacles.min(by: { ($0["nearestDistanceMeters"] as? Double ?? .infinity) < ($1["nearestDistanceMeters"] as? Double ?? .infinity) }),
-        let distance = obstacle["nearestDistanceMeters"] as? Double {
-        var warning: [String: Any] = [
+    let snapshotAim = snapshot["aimState"] as? String ?? "level"
+    if snapshot["depthState"] as? String == "available", isNormalTracking(frame.camera.trackingState),
+      snapshotAim != "lowered", snapshotAim != "covered" {
+      let hazards = snapshot["hazards"] as? [[String: Any]] ?? []
+      if let fastMover = hazards.first(where: { ($0["kind"] as? String) == "fast-mover" }) {
+        var payload: [String: Any] = [
+          "id": fastMover["id"] as? String ?? "lidar-fast-mover",
+          "kind": "fast-mover",
           "timestampMs": frameClock.unixMilliseconds(for: frame.timestamp),
-          "severity": distance <= settings.criticalDistance ? "critical" : "warning",
-          "sector": obstacle["sector"] as? String ?? "unknown", "direction": obstacle["direction"] as? [String: Any] ?? [:],
-          "distanceMeters": distance, "robustDistanceMeters": obstacle["robustDistanceMeters"] as? Double ?? distance,
-          "confidence": obstacle["meanConfidence"] as? Double ?? 0, "obstacle": obstacle
+          "severity": "critical",
+          "direction": ["bearing": fastMover["direction"] as? String ?? "ahead", "yawDegrees": fastMover["bearingDegrees"] as? Double ?? 0],
+          "distanceMeters": fastMover["distanceMeters"] as? Double ?? 0,
+          "message": fastMover["message"] as? String ?? "Fast movement ahead — hold still."
         ]
-        if let objects = snapshot["objects"] as? [[String: Any]],
-          let label = LiveObstacleIdentity.label(obstacle: obstacle, objects: objects) {
-          warning["label"] = label
+        if let closing = fastMover["closingSpeedMps"] as? Double { payload["closingSpeedMps"] = closing }
+        if let external = fastMover["externalSpeedMps"] as? Double { payload["externalSpeedMps"] = external }
+        if let ttc = fastMover["ttcSeconds"] as? Double { payload["ttcSeconds"] = ttc }
+        emit?("onWarning", payload)
+      } else if let verticalHazard = hazards.first(where: {
+        let kind = $0["kind"] as? String ?? ""
+        return kind == "head-height" || kind == "drop-off" || kind == "step-down" || kind == "step-up"
+      }) {
+        emit?("onWarning", [
+          "id": verticalHazard["id"] as? String ?? "lidar-vertical-hazard",
+          "kind": verticalHazard["kind"] as? String ?? "obstacle",
+          "timestampMs": frameClock.unixMilliseconds(for: frame.timestamp),
+          "severity": verticalHazard["severity"] as? String == "urgent" ? "critical" : "warning",
+          "direction": ["bearing": verticalHazard["direction"] as? String ?? "ahead", "yawDegrees": verticalHazard["bearingDegrees"] as? Double ?? 0],
+          "distanceMeters": verticalHazard["distanceMeters"] as? Double ?? 0,
+          "message": verticalHazard["message"] as? String ?? "Hazard ahead."
+        ])
+      } else {
+        let corridor = snapshot["corridor"] as? [String: Any]
+        let receding = corridor?["recedingObstacle"] as? Bool ?? false
+        let obstacles = (snapshot["obstacles"] as? [[String: Any]] ?? []).filter { ($0["nearestDistanceMeters"] as? Double ?? .infinity) <= settings.warningDistance }
+        if let obstacle = obstacles.min(by: { ($0["nearestDistanceMeters"] as? Double ?? .infinity) < ($1["nearestDistanceMeters"] as? Double ?? .infinity) }),
+          let distance = obstacle["nearestDistanceMeters"] as? Double {
+          // Suppress non-urgent static nag when the object ahead is actively moving away from the user.
+          if !receding || distance <= settings.criticalDistance {
+            var warning: [String: Any] = [
+              "timestampMs": frameClock.unixMilliseconds(for: frame.timestamp),
+              "severity": distance <= settings.criticalDistance ? "critical" : "warning",
+              "sector": obstacle["sector"] as? String ?? "unknown", "direction": obstacle["direction"] as? [String: Any] ?? [:],
+              "distanceMeters": distance, "robustDistanceMeters": obstacle["robustDistanceMeters"] as? Double ?? distance,
+              "confidence": obstacle["meanConfidence"] as? Double ?? 0, "obstacle": obstacle
+            ]
+            if let objects = snapshot["objects"] as? [[String: Any]],
+              let label = LiveObstacleIdentity.label(obstacle: obstacle, objects: objects) {
+              warning["label"] = label
+            }
+            emit?("onWarning", warning)
+          }
         }
-        emit?("onWarning", warning)
       }
     }
     if allowVision { schedulePeople(frame) }
@@ -496,15 +573,21 @@ final class PerceptionController: NSObject, ARSessionDelegate {
     ]
     let freshGeometry = depthState == "available" && trackingReady
     var objects = freshGeometry ? meshes.objects(frame: frame, timestamp: cameraTimestamp, orientation: imageOrientation, settings: settings) : []
-    let peopleAreCurrent = lastPersonScanFrameTime.map { (0...2.5).contains(frame.timestamp - $0) } ?? false
+    let visionAge = lastPersonScanFrameTime.map { frame.timestamp - $0 }
+    let peopleAreCurrent = visionAge.map { (0...2.5).contains($0) } ?? false
+    let visionDepthFresh = visionAge.map { (0...0.85).contains($0) } ?? false
     let people = peopleAreCurrent ? latestPeople : []
+    let animals = peopleAreCurrent ? latestAnimals : []
     if !stale && trackingReady {
-      objects.append(contentsOf: people.map { person in
-        if freshGeometry && lastPersonScanFrameTime == frame.timestamp { return person }
-        var copy = person
-        for key in ["distanceMeters", "robustDistanceMeters", "steps", "nearestPoint", "depthTimestampMs", "direction"] { copy.removeValue(forKey: key) }
-        return copy
-      })
+      for entity in people + animals {
+        if freshGeometry && (lastPersonScanFrameTime == frame.timestamp || visionDepthFresh) {
+          objects.append(entity)
+        } else {
+          var copy = entity
+          for key in ["distanceMeters", "robustDistanceMeters", "steps", "nearestPoint", "depthTimestampMs", "direction"] { copy.removeValue(forKey: key) }
+          objects.append(copy)
+        }
+      }
     }
     let validOCR = depthState == "available" ? ocr : ocr.map { observation in
       var copy = observation
@@ -512,6 +595,38 @@ final class PerceptionController: NSObject, ARSessionDelegate {
       return copy
     }
     let seats = sameFramePersonScan ? seatCandidates(objects: objects, people: people, frame: frame) : []
+    var corridorDict: [String: Any]?
+    var hazardsList: [[String: Any]] = []
+    let pitchDegrees = CorridorAnalyzer.cameraPitchDegrees(transform: frame.camera.transform)
+    var aimState = CorridorAnalyzer.aimState(pitchDegrees: pitchDegrees)
+    let headingDegrees = headingAligned && trackingReady ? CorridorAnalyzer.cameraHeadingDegrees(transform: frame.camera.transform) : nil
+    if freshGeometry, let depth = frame.sceneDepth,
+      let map = DepthMap(depth: depth.depthMap, confidence: depth.confidenceMap, imageSize: frame.camera.imageResolution),
+      let rawCorridor = map.read({ samples in
+        CorridorAnalyzer.analyze(
+          samples: samples,
+          intrinsics: frame.camera.intrinsics,
+          imageSize: frame.camera.imageResolution,
+          cameraTransform: frame.camera.transform,
+          headingAligned: self.headingAligned,
+          knownFloorY: self.detectedFloorY,
+          warningDistance: self.settings.warningDistance,
+          criticalDistance: self.settings.criticalDistance
+        )
+      }) {
+      let approach = approachTracker.update(
+        timestamp: frame.timestamp,
+        cameraTransform: frame.camera.transform,
+        sectors: rawCorridor.sectors,
+        aimState: rawCorridor.aimState
+      )
+      let corridor = rawCorridor.applying(approach: approach)
+      aimState = corridor.aimState
+      corridorDict = corridor.toDictionary()
+      hazardsList = corridor.hazardDictionaries(timestampMs: cameraTimestamp)
+    } else if aimState == "lowered" || !freshGeometry {
+      approachTracker.reset()
+    }
     var snapshot: [String: Any] = [
       "id": UUID().uuidString, "source": "arkit", "mode": mode,
       "cameraTimestampMs": cameraTimestamp,
@@ -521,8 +636,11 @@ final class PerceptionController: NSObject, ARSessionDelegate {
       "trackingReason": Geometry.nullable(trackingReason(frame.camera.trackingState)),
       "depthState": depthState, "confidence": freshGeometry ? analysis.confidence : 0,
       "sensorHealth": sensorHealth, "obstacles": freshGeometry ? analysis.obstacles : [],
-      "objects": objects, "freeSeats": seats, "ocr": validOCR
+      "objects": objects, "freeSeats": seats, "ocr": validOCR,
+      "aimState": aimState, "pitchDegrees": pitchDegrees, "hazards": hazardsList
     ]
+    if let headingDegrees { snapshot["headingDegrees"] = headingDegrees }
+    if let corridorDict { snapshot["corridor"] = corridorDict }
     if let image { snapshot["image"] = image }
     return snapshot
   }
@@ -581,8 +699,10 @@ final class PerceptionController: NSObject, ARSessionDelegate {
 
   private func schedulePeople(_ frame: ARFrame) {
     guard settings.detectPeople, !personTaskRunning, isNormalTracking(frame.camera.trackingState) else { return }
+    let pitch = CorridorAnalyzer.cameraPitchDegrees(transform: frame.camera.transform)
+    guard pitch >= -58.0 else { return }
     let now = ProcessInfo.processInfo.systemUptime
-    guard now - lastPersonRequestUptime >= 1 else { return }
+    guard now - lastPersonRequestUptime >= 0.55 else { return }
     lastPersonRequestUptime = now
     personTaskRunning = true
     let generation = captureGeneration
@@ -591,26 +711,31 @@ final class PerceptionController: NSObject, ARSessionDelegate {
     let settings = self.settings
     visionQueue.async {
       do {
-        let people = try PerceptionVision.people(frame: frame, orientation: orientation, timestamp: timestamp, settings: settings)
+        let detected = try PerceptionVision.peopleAndAnimals(frame: frame, orientation: orientation, timestamp: timestamp, settings: settings)
         self.processingQueue.async {
           guard self.active, generation == self.captureGeneration else { return }
           self.personTaskRunning = false
-          self.updatePeople(people, frameTime: frame.timestamp)
+          self.updateVisionEntities(people: detected.people, animals: detected.animals, frameTime: frame.timestamp)
         }
       } catch {
         self.processingQueue.async {
           guard self.active, generation == self.captureGeneration else { return }
           self.personTaskRunning = false
-          self.report("E_VISION", "On-device person detection failed: \(error.localizedDescription)", recoverable: true)
+          self.report("E_VISION", "On-device person and animal detection failed: \(error.localizedDescription)", recoverable: true)
         }
       }
     }
   }
 
-  private func updatePeople(_ people: [[String: Any]], frameTime: Double) {
-    var previous = latestPeople
+  private func updateVisionEntities(people: [[String: Any]], animals: [[String: Any]], frameTime: Double) {
+    latestPeople = trackEntities(people, previous: latestPeople, prefix: "person", sequence: &personSequence)
+    latestAnimals = trackEntities(animals, previous: latestAnimals, prefix: "animal", sequence: &animalSequence)
+    lastPersonScanFrameTime = frameTime
+  }
+
+  private func trackEntities(_ incoming: [[String: Any]], previous: [[String: Any]], prefix: String, sequence: inout Int) -> [[String: Any]] {
     var used: Set<String> = []
-    latestPeople = people.map { input in
+    return incoming.map { input in
       var object = input
       let bounds = object["bounds"] as? [String: Double]
       var identifier: String?
@@ -628,13 +753,11 @@ final class PerceptionController: NSObject, ARSessionDelegate {
         identifier = best?.id
       }
       if let identifier { used.insert(identifier) }
-      else { personSequence += 1; identifier = "person-\(personSequence)" }
+      else { sequence += 1; identifier = "\(prefix)-\(sequence)" }
       object["id"] = identifier
       object["trackingState"] = "normal"
       return object
     }
-    previous.removeAll()
-    lastPersonScanFrameTime = frameTime
   }
 
   private func reportingStatus(tracking: String, reason: String) {

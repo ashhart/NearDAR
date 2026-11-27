@@ -190,7 +190,13 @@ public actor VisionController {
       statusStore.emit("started", status: status(), requestId: request.requestId)
       let contents = [Content.imageFile(image!.path), Content.text(request.prompt)]
       let stream = conversation.sendMessageStream(Message(contents: contents), maxOutputTokens: request.maxTokens)
-      for try await chunk in stream { generated += chunk.toString }
+      for try await chunk in stream {
+        let delta = chunk.toString
+        if !delta.isEmpty {
+          generated += delta
+          statusStore.emit("token", status: nil, requestId: request.requestId, message: nil, delta: delta, text: generated)
+        }
+      }
       if let termination = activeRequest?.termination { throw Self.terminationFailure(termination) }
     } catch {
       completionError = VisionFailure.wrap(error, code: "E_VISION_INFERENCE", fallback: "LiteRT-LM scene generation failed.")
@@ -427,11 +433,20 @@ private final class VisionStatusStore: @unchecked Sendable {
     lock.unlock()
   }
 
-  func emit(_ type: String, status: [String: Any]? = nil, requestId: String? = nil, message: String? = nil) {
+  func emit(
+    _ type: String,
+    status: [String: Any]? = nil,
+    requestId: String? = nil,
+    message: String? = nil,
+    delta: String? = nil,
+    text: String? = nil
+  ) {
     var event: [String: Any] = ["type": type]
     if let status { event["status"] = status }
     if let requestId { event["requestId"] = requestId }
     if let message { event["message"] = message }
+    if let delta { event["delta"] = delta }
+    if let text { event["text"] = text }
     emitClosure(event)
   }
 }

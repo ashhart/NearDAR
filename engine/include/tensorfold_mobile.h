@@ -37,8 +37,9 @@ typedef void (*SonarTensorFoldEventCallback)(
 const char *sonar_tf_capabilities_json(void);
 
 /*
- * Opens exactly one real model. The context and cache limits are hard startup
- * limits. `error` receives a NUL-terminated diagnostic on failure.
+ * Opens exactly one real model (LFM3-VL-2B, LFM3-1.7B, or Qwen3.5-2B).
+ * The context and cache limits are hard startup limits.
+ * `error` receives a NUL-terminated diagnostic on failure.
  */
 SonarTensorFoldEngine sonar_tf_open(
     const char *checkpoint_directory,
@@ -54,8 +55,8 @@ const char *sonar_tf_info_json(SonarTensorFoldEngine engine);
 void sonar_tf_close(SonarTensorFoldEngine engine);
 
 /*
- * Queues raw-prompt generation. Text and token ids are streamed through the
- * callback on the engine thread. The callback must not call back into TensorFold.
+ * Queues raw-prompt text-only generation. Text and token ids are streamed through
+ * the callback on the engine thread. The callback must not call back into TensorFold.
  * Returns zero on acceptance and writes a diagnostic on refusal.
  */
 int32_t sonar_tf_generate(
@@ -63,6 +64,33 @@ int32_t sonar_tf_generate(
     uint64_t request_id,
     const char *prompt,
     size_t prompt_length,
+    uint32_t max_tokens,
+    int32_t sample,
+    double temperature,
+    uint32_t top_k,
+    double top_p,
+    double min_p,
+    uint64_t seed,
+    SonarTensorFoldEventCallback callback,
+    void *callback_context,
+    char *error,
+    size_t error_capacity);
+
+/*
+ * Queues multimodal vision + text generation using tightly packed 24-bit RGB pixels
+ * (3 bytes per pixel, width * height * 3 bytes). Pass rgb_pixels = NULL for text-only.
+ * The prompt must contain one `<|image|>` placeholder token when an image is provided.
+ * TensorFold's Metal vision tower prepares, projects, and streams the reply on-device.
+ */
+int32_t sonar_tf_generate_vision(
+    SonarTensorFoldEngine engine,
+    uint64_t request_id,
+    const char *prompt,
+    size_t prompt_length,
+    const uint8_t *rgb_pixels,
+    uint32_t image_width,
+    uint32_t image_height,
+    uint32_t max_image_tokens,
     uint32_t max_tokens,
     int32_t sample,
     double temperature,

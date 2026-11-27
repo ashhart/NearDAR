@@ -1,5 +1,5 @@
 import { type EventSubscription, requireOptionalNativeModule } from 'expo-modules-core'
-import { createDefaultManifest, defaultModelId, throwIfCancelled } from './manifest'
+import { createDefaultManifest, defaultInstallSizeBytes, defaultModelId, throwIfCancelled } from './manifest'
 import type { EngineEvent, EngineStatus, InstallManifest, NativeTensorFoldEngine } from './types'
 
 const unavailableMessage = 'TensorFold native inference is unavailable on this platform. Install the iOS or Android development build.'
@@ -26,7 +26,7 @@ const installations = new Map<string, AbortController>()
 
 async function installModel(modelId: string = defaultModelId): Promise<EngineStatus> {
   if (modelId !== defaultModelId) {
-    throw new Error(`Unknown on-device model ${modelId}. This build admits Qwen3.5-2B only.`)
+    throw new Error(`Unknown on-device model ${modelId}. This build admits ${defaultModelId} only.`)
   }
   if (installations.has(modelId)) throw new Error(`Model ${modelId} is already installing.`)
   const controller = new AbortController()
@@ -77,5 +77,5 @@ export function addEngineListener(listener: (event: EngineEvent) => void): Event
 
 
 export type { EngineCapabilities, EngineEvent, EngineGenerationRequest, EngineStatus } from './types'
-export { createDefaultManifest } from './manifest'
+export { createDefaultManifest, defaultInstallSizeBytes, defaultModelId } from './manifest'
 export default Engine

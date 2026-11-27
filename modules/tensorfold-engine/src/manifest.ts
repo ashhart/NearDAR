@@ -1,12 +1,22 @@
 import { sha256 } from './sha256'
 import type { InstallManifest, ModelFile } from './types'
 
-export const defaultModelId = 'qwen3.5-2b'
-export const defaultRepository = 'mlx-community/Qwen3.5-2B-MLX-4bit'
-export const pinnedRevision = '93760be4f1f69842a46bc13dbdc0f19e291392a3'
+export const defaultModelId = 'lfm3-vl-2b'
+export const defaultRepository = 'LiquidAI/LFM3-VL-2B-MLX-4bit'
+export const pinnedRevision = 'c823fade98e35a3d6942ad4d38b1ea15f675cd12'
+export const defaultInstallSizeBytes = 1_609_116_269
+
 const metadataNames: Record<string, true> = {
-  'config.json': true, 'generation_config.json': true, 'tokenizer.json': true, 'tokenizer_config.json': true,
-  'special_tokens_map.json': true, 'chat_template.jinja': true, 'tokenizer.model': true, 'vocab.json': true, 'merges.txt': true,
+  'config.json': true,
+  'generation_config.json': true,
+  'processor_config.json': true,
+  'tokenizer.json': true,
+  'tokenizer_config.json': true,
+  'special_tokens_map.json': true,
+  'chat_template.jinja': true,
+  'tokenizer.model': true,
+  'vocab.json': true,
+  'merges.txt': true,
   'model.safetensors.index.json': true,
 }
 
@@ -18,7 +28,7 @@ interface HubEntry {
 
 export function throwIfCancelled(signal?: AbortSignal): void {
   if (signal?.aborted) {
-    const error = new Error('Conversation download cancelled.')
+    const error = new Error('TensorFold model download cancelled.')
     error.name = 'AbortError'
     throw error
   }
@@ -83,10 +93,13 @@ export async function createDefaultManifest(signal?: AbortSignal): Promise<Insta
     const size = entry.size
     if (typeof size !== 'number' || !Number.isSafeInteger(size) || size < 0) throw new Error(`Invalid size for ${entry.path}.`)
     const url = `https://huggingface.co/${repositoryUrl}/resolve/${revisionUrl}/${entry.path.split('/').map(encodeURIComponent).join('/')}`
+    const lfsDigest = entry.lfs?.oid
     if (weight) {
-      const digest = entry.lfs?.oid
-      if (!digest || !/^[a-f0-9]{64}$/.test(digest)) throw new Error(`No SHA-256 LFS digest is available for ${entry.path}.`)
-      files.push({ path: entry.path, url, size, sha256: digest })
+      if (!lfsDigest || !/^[a-f0-9]{64}$/.test(lfsDigest)) throw new Error(`No SHA-256 LFS digest is available for ${entry.path}.`)
+      files.push({ path: entry.path, url, size, sha256: lfsDigest })
+    } else if (lfsDigest && /^[a-f0-9]{64}$/.test(lfsDigest)) {
+      // Large metadata files like tokenizer.json (17 MB) carry an authoritative Git LFS SHA-256 directly.
+      files.push({ path: entry.path, url, size, sha256: lfsDigest })
     } else {
       const response = await fetch(url, { signal })
       const bytes = await responseBytes(response, entry.path)

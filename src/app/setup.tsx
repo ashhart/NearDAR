@@ -1,23 +1,20 @@
 import { useEffect, useRef, useState } from 'react'
-import { AccessibilityInfo, Image, StyleSheet, View, useWindowDimensions } from 'react-native'
+import { AccessibilityInfo, StyleSheet, View } from 'react-native'
 import { router } from 'expo-router'
-import { Body, Button, Heading, Screen, TopBar, useColors } from '../components/ui'
+import { Body, Button, Heading, Screen, StatusCard, TopBar } from '../components/ui'
 import { VisionModelCard } from '../components/VisionModelCard'
 import * as Voice from '../../modules/tensorfold-voice/src'
 import { useAppSettings } from '../lib/SettingsContext'
-import { useGuidance } from '../lib/guidance/useGuidance'
+import { useSatnav } from '../lib/satnav/useSatnav'
 
 export default function Setup() {
   const { settings, update } = useAppSettings()
-  const { vision, visionStatus } = useGuidance()
-  const colors = useColors()
-  const { fontScale, width } = useWindowDimensions()
-  const photoHeight = Math.round((Math.min(width, 550) - 40) / 1.6)
+  const satnav = useSatnav()
   const [continuing, setContinuing] = useState(false)
   const leaving = useRef(false)
   const mounted = useRef(true)
-  const waitingForDownload = visionStatus.state === 'downloading' || visionStatus.state === 'loading'
-  const hasDownload = visionStatus.state === 'installed' || visionStatus.state === 'ready'
+  const waitingForDownload = satnav.visionStatus.state === 'downloading' || satnav.visionStatus.state === 'loading'
+  const hasDownload = satnav.visionStatus.state === 'installed' || satnav.visionStatus.state === 'ready'
 
   useEffect(() => {
     mounted.current = true
@@ -25,9 +22,16 @@ export default function Setup() {
     void AccessibilityInfo.isScreenReaderEnabled().then((enabled) => {
       if (!mounted.current || enabled) return
       started = true
-      return Voice.speak('Point your camera. Download offline descriptions to recognise nearby objects and look for seats. Choose Start hands-free to ask a question using your voice. Say stop camera to finish. NearDAR can miss hazards. Use it alongside your cane, guide dog, and orientation and mobility training.', {
-        voiceIdentifier: settings.voiceIdentifier, rate: settings.speechRate, priority: 'answer', interrupt: true, speakerFallback: settings.speakerFallback,
-      })
+      return Voice.speak(
+        'Welcome to NearDar, your on-device voice and haptic walking satnav. Download TensorFold Mobile to hear about roadworks, cyclists, animals, doorways, crossings, and signs. Use open-ear headphones or Transparency mode so you can still hear traffic, and always use NearDar alongside your cane, guide dog, and mobility training.',
+        {
+          voiceIdentifier: settings.voiceIdentifier,
+          rate: settings.speechRate,
+          priority: 'answer',
+          interrupt: true,
+          speakerFallback: settings.speakerFallback,
+        },
+      )
     }).catch(() => {})
     return () => {
       mounted.current = false
@@ -35,37 +39,64 @@ export default function Setup() {
     }
   }, [settings.speechRate, settings.speakerFallback, settings.voiceIdentifier])
 
-  async function finish(downloadReady = false) {
+  async function finish() {
     if (leaving.current || !mounted.current) return
     leaving.current = true
     setContinuing(true)
     await update({ onboardingComplete: true }).catch(() => {})
-    if (mounted.current) router.replace({ pathname: '/guide', params: { setup: downloadReady ? 'downloaded' : 'complete' } })
+    if (mounted.current) router.replace('/guide')
   }
 
-  const continueLabel = waitingForDownload ? 'Open NearDAR while preparing' : vision?.available && !hasDownload ? 'Continue without download' : 'Continue to NearDAR'
+  const continueLabel = waitingForDownload
+    ? 'Start Walking while downloading'
+    : satnav.vision?.available && !hasDownload
+      ? 'Start without vision model'
+      : 'Start Walking'
 
-  return <Screen footer={<Button label={continueLabel} secondary={!!vision?.available && !hasDownload} icon="arrow-forward" hint="Choose Start hands-free or Start camera on the next screen." busy={continuing} onPress={() => void finish()} />}>
-    <TopBar />
-    <View style={styles.intro}>
-      <Heading editorial focusOnEntry>Point your camera.</Heading>
-      <Body muted>Ask what’s nearby, look for a seat, find an object, or read text aloud.</Body>
-    </View>
-    {fontScale < 1.5 && <Image
-      source={require('../../assets/neardar-welcome.jpg')}
-      accessible={false}
-      aria-hidden
-      accessibilityElementsHidden
-      importantForAccessibility="no-hide-descendants"
-      resizeMode="cover"
-      style={[styles.photo, { height: photoHeight, backgroundColor: colors.raised }]}
-    />}
-    <VisionModelCard onReady={() => void finish(true)} />
-    <Body muted>NearDAR can miss hazards. Use it alongside your cane, guide dog, and orientation and mobility training.</Body>
-  </Screen>
+  return (
+    <Screen
+      footer={
+        <Button
+          label={continueLabel}
+          secondary={!!satnav.vision?.available && !hasDownload}
+          icon="walk-outline"
+          hint="Opens the eyes-free NearDar satnav."
+          busy={continuing}
+          onPress={() => void finish()}
+        />
+      }
+    >
+      <TopBar />
+      <View style={styles.intro}>
+        <Heading editorial focusOnEntry>Voice &amp; haptic satnav.</Heading>
+        <Body muted>
+          Follow gentle steering pulses, 3D headphone beacons, and live LiDAR hazard cues—and tap anywhere to talk about what is ahead, all on your phone.
+        </Body>
+      </View>
+
+      <VisionModelCard onReady={() => void finish()} />
+
+      <StatusCard title="Feel the satnav cues">
+        <Body muted>Test how NearDar feels in your hand and sounds in headphones before walking.</Body>
+        <View style={styles.cues}>
+          <Button compact secondary label="On-course beat" onPress={() => void satnav.previewFeedback('compass-lock')} />
+          <Button compact secondary label="Fast mover" onPress={() => void satnav.previewFeedback('fast-mover')} />
+          <Button compact secondary label="Dog / presence" onPress={() => void satnav.previewFeedback('animal')} />
+          <Button compact secondary label="Head hazard" onPress={() => void satnav.previewFeedback('head-hazard')} />
+          <Button compact secondary label="Step / drop-off" onPress={() => void satnav.previewFeedback('drop-off')} />
+        </View>
+      </StatusCard>
+
+      <StatusCard title="Keep your ears open to the street">
+        <Body muted>
+          For the best 3D beacons without blocking traffic or footsteps, use bone-conduction headphones or Transparency mode—never noise cancellation outdoors. NearDar works alongside your white cane, guide dog, and orientation and mobility training.
+        </Body>
+      </StatusCard>
+    </Screen>
+  )
 }
 
 const styles = StyleSheet.create({
   intro: { gap: 10, paddingTop: 4 },
-  photo: { width: '100%', borderRadius: 20 },
+  cues: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
 })

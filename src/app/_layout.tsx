@@ -1,16 +1,26 @@
 import { Stack } from 'expo-router'
 import { StatusBar, useColorScheme } from 'react-native'
 import { useColors } from '../components/ui'
-import { SettingsProvider } from '../lib/SettingsContext'
-import { GuidanceProvider } from '../lib/guidance/useGuidance'
+import { SettingsProvider, useAppSettings } from '../lib/SettingsContext'
+import { SatnavProvider } from '../lib/satnav/useSatnav'
 
-export default function RootLayout() {
+function AppShell() {
   const colors = useColors()
-  const dark = useColorScheme() === 'dark'
-  return <SettingsProvider>
-    <GuidanceProvider>
+  const { settings } = useAppSettings()
+  const scheme = useColorScheme()
+  const dark = settings.oledHighContrast || scheme === 'dark'
+  return (
+    <SatnavProvider>
       <StatusBar barStyle={dark ? 'light-content' : 'dark-content'} />
       <Stack screenOptions={{ headerShown: false, animation: 'none', contentStyle: { backgroundColor: colors.background } }} />
-    </GuidanceProvider>
-  </SettingsProvider>
+    </SatnavProvider>
+  )
+}
+
+export default function RootLayout() {
+  return (
+    <SettingsProvider>
+      <AppShell />
+    </SettingsProvider>
+  )
 }

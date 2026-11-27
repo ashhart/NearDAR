@@ -1,17 +1,17 @@
 import { router } from 'expo-router'
 import { Body, Button, Heading, Screen, TopBar } from '../components/ui'
 import { VisionModelCard } from '../components/VisionModelCard'
-import { useGuidance } from '../lib/guidance/useGuidance'
+import { useSatnav } from '../lib/satnav/useSatnav'
 
 export default function OfflineDescriptions() {
-  const { visionStatus } = useGuidance()
+  const { visionStatus } = useSatnav()
   const ready = visionStatus.state === 'ready'
   const returnToGuide = () => router.canGoBack() ? router.back() : router.replace('/guide')
 
-  return <Screen footer={ready ? <Button label="Continue to NearDAR" icon="arrow-forward" onPress={returnToGuide} /> : undefined}>
+  return <Screen footer={ready ? <Button label="Back to Satnav" icon="arrow-forward" onPress={returnToGuide} /> : undefined}>
     <TopBar back={returnToGuide} />
-    <Heading editorial focusOnEntry>Describe what’s nearby</Heading>
-    <Body muted>Ask about the people, objects and seats in the camera view. The descriptions are generated on your phone.</Body>
+    <Heading editorial focusOnEntry>TensorFold Mobile</Heading>
+    <Body muted>Talk naturally to NearDar about roadworks, cyclists, animals, doorways, signs, crossings, and obstacles around you. Vision and conversation run locally on TensorFold Metal.</Body>
     <VisionModelCard />
   </Screen>
 }

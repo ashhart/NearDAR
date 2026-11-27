@@ -1,9 +1,16 @@
-//! The phone's deliberately narrow admission layer over TensorFold's Qwen3.5 Metal family.
+//! The phone's admission layer over TensorFold's mobile-sized Metal families:
+//! LFM3-VL-2B (vision + language), LFM3-1.7B (text), and Qwen3.5-2B (text).
 const std = @import("std");
 const api = @import("engine_api");
 
 pub const backend = "metal";
 pub const families: []const api.Family = &.{
+    .{ .model_type = "lfm3_vl", .formats = &.{
+        "mlx-q4g32", "mlx-q4g64", "mlx-q6g64", "mlx-q8g64",
+    } },
+    .{ .model_type = "lfm3", .formats = &.{
+        "mlx-q4g32", "mlx-q4g64", "mlx-q6g64", "mlx-q8g64",
+    } },
     .{ .model_type = "qwen3_5", .formats = &.{
         "mlx-q2g32", "mlx-q2g64", "mlx-q2g128",
         "mlx-q3g32", "mlx-q3g64", "mlx-q3g128",
@@ -14,8 +21,8 @@ pub const families: []const api.Family = &.{
     } },
 };
 
-/// Admits only the dense 2B layout. The same model_type also names 27B and MoE
-/// checkpoints, which have no phone memory or device qualification.
+/// Admits mobile-sized TensorFold Metal checkpoints: LFM3-VL-2B (with native vision),
+/// LFM3-1.7B, and dense Qwen3.5-2B. Desktop 27B/MoE checkpoints are refused.
 pub fn open(
     a: std.mem.Allocator,
     gpa: std.mem.Allocator,
@@ -23,19 +30,33 @@ pub fn open(
     o: api.Open,
     problem: *[]const u8,
 ) !?api.Opened {
-    if (!std.mem.eql(u8, o.model_type, "qwen3_5")) {
-        problem.* = "this phone build serves only TensorFold's Qwen3.5-2B Metal checkpoint";
-        return null;
-    }
-    if (@import("qwen27_engine").owns(a, io, o.dir)) {
-        problem.* = "Qwen3.8 27B-class checkpoints are not admitted on phones";
-        return null;
-    }
     var phone = o;
     phone.lanes = 1;
     phone.lanes_fixed = true;
     phone.drafts = false;
     phone.drafter = null;
-    phone.vision = null;
-    return @import("qwen35_family").open(a, gpa, io, phone, problem);
+
+    if (std.mem.eql(u8, o.model_type, "lfm3_vl")) {
+        phone.vision = .{
+            .image_tokens = 256,
+            .image_tokens_set = true,
+            .max_images = 1,
+        };
+        return @import("phone_families").lfm3.open(a, gpa, io, phone, problem);
+    }
+    if (std.mem.eql(u8, o.model_type, "lfm3")) {
+        phone.vision = null;
+        return @import("phone_families").lfm3.open(a, gpa, io, phone, problem);
+    }
+    if (std.mem.eql(u8, o.model_type, "qwen3_5")) {
+        if (@import("phone_families").qwen27_engine.owns(a, io, o.dir, false)) {
+            problem.* = "Qwen3.8 27B-class checkpoints are not admitted on phones";
+            return null;
+        }
+        phone.vision = null;
+        return @import("phone_families").qwen35.open(a, gpa, io, phone, problem);
+    }
+
+    problem.* = "this mobile TensorFold build serves LFM3-VL-2B, LFM3-1.7B, or Qwen3.5-2B Metal checkpoints";
+    return null;
 }

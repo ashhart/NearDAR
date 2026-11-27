@@ -9,7 +9,7 @@ struct PerceptionSettings {
   var criticalDistance = 0.9
   var maximumFrameAgeMs = 500.0
   var maximumAlignmentAgeMs = 80.0
-  var proximityIntervalMs = 250.0
+  var proximityIntervalMs = 120.0
   var detectPeople = true
   var recognizeText = true
   var ocrLanguages: [String] = []

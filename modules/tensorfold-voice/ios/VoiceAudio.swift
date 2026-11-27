@@ -7,7 +7,7 @@ enum VoiceAudio {
     var step = "configuring audio"
     do {
       if recognition {
-        try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.allowBluetoothHFP, .duckOthers])
+        try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.allowBluetoothHFP, .defaultToSpeaker, .duckOthers])
       } else {
         try session.setCategory(.playback, mode: .spokenAudio, options: [.duckOthers])
       }
@@ -27,7 +27,7 @@ enum VoiceAudio {
     if !recognition && !speakerFallback && currentRouteKind() == "speaker" {
       deactivate()
       throw VoiceFailure(operation: operation, code: "E_AUDIO_ROUTE",
-        message: "Connect headphones to hear NearDAR, or enable the phone speaker in Settings.")
+        message: "Connect headphones to hear NearDar, or enable the phone speaker in Settings.")
     }
   }
 

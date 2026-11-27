@@ -19,6 +19,16 @@ export const defaultSettings: GuidanceSettings = {
   urgentHaptics: true,
   speakerFallback: true,
   continuousListening: false,
+  guidanceMode: 'satnav',
+  talkGesture: 'tap',
+  hapticSteering: true,
+  hapticProximity: true,
+  spatialBeacon: true,
+  ambientObstacleNaming: true,
+  proactiveNarration: true,
+  directionStyle: 'natural',
+  oledHighContrast: false,
+  warningDistanceMeters: 2.2,
 }
 
 export function normalizeCompanionName(value: string): string {
@@ -37,6 +47,16 @@ function validSettings(value: unknown): GuidanceSettings {
     urgentHaptics: stored.urgentHaptics !== false,
     speakerFallback: stored.speakerFallback !== false,
     continuousListening: stored.continuousListening === true,
+    guidanceMode: stored.guidanceMode === 'quiet' || stored.guidanceMode === 'explore' ? stored.guidanceMode : 'satnav',
+    talkGesture: stored.talkGesture === 'hold' ? 'hold' : 'tap',
+    hapticSteering: stored.hapticSteering !== false,
+    hapticProximity: stored.hapticProximity !== false,
+    spatialBeacon: stored.spatialBeacon !== false,
+    ambientObstacleNaming: stored.ambientObstacleNaming !== false,
+    proactiveNarration: stored.proactiveNarration !== false,
+    directionStyle: stored.directionStyle === 'clock' ? 'clock' : 'natural',
+    oledHighContrast: stored.oledHighContrast === true,
+    warningDistanceMeters: typeof stored.warningDistanceMeters === 'number' && stored.warningDistanceMeters >= 1.2 && stored.warningDistanceMeters <= 3.5 ? stored.warningDistanceMeters : 2.2,
   }
 }
 
@@ -77,7 +97,7 @@ export function useSettings(): SettingsStore {
     latest.current = next
     setSettings(next)
     const write = pendingWrite.current.then(() => storeSettings(next))
-    pendingWrite.current = write.then(() => setSaveError(undefined), () => setSaveError('NearDAR couldn’t save these settings. They apply until you close the app.'))
+    pendingWrite.current = write.then(() => setSaveError(undefined), () => setSaveError('NearDar couldn’t save these settings. They apply until you close the app.'))
     await pendingWrite.current
   }
 

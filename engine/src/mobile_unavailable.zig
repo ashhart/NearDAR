@@ -81,6 +81,48 @@ export fn sonar_tf_generate(
     return -1;
 }
 
+export fn sonar_tf_generate_vision(
+    engine: *anyopaque,
+    request_id: u64,
+    prompt_ptr: [*]const u8,
+    prompt_len: usize,
+    rgb_pixels: ?[*]const u8,
+    image_width: u32,
+    image_height: u32,
+    max_image_tokens: u32,
+    max_tokens: u32,
+    sample: i32,
+    temperature: f64,
+    top_k: u32,
+    top_p: f64,
+    min_p: f64,
+    seed: u64,
+    callback: Callback,
+    callback_context: ?*anyopaque,
+    error_out: [*]u8,
+    error_capacity: usize,
+) i32 {
+    _ = engine;
+    _ = request_id;
+    _ = prompt_ptr;
+    _ = prompt_len;
+    _ = rgb_pixels;
+    _ = image_width;
+    _ = image_height;
+    _ = max_image_tokens;
+    _ = max_tokens;
+    _ = sample;
+    _ = temperature;
+    _ = top_k;
+    _ = top_p;
+    _ = min_p;
+    _ = seed;
+    _ = callback;
+    _ = callback_context;
+    writeError(error_out, error_capacity, refusal);
+    return -1;
+}
+
 export fn sonar_tf_cancel(engine: *anyopaque, request_id: u64) void {
     _ = engine;
     _ = request_id;

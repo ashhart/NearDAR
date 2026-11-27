@@ -99,16 +99,18 @@ fn wireMetal(b: *std.Build, root: *std.Build.Module, target: std.Build.ResolvedT
 
     const api = module(b, "zig/src/core/engine_api.zig", target, optimize);
     api.addImport("lanes", lanes);
-    const detector = module(b, "zig/src/native/qwen27_engine.zig", target, optimize);
-    detector.addImport("tensorfold", engine);
-    const family = module(b, "zig/src/native/qwen35.zig", target, optimize);
-    family.addImport("metal", metal);
-    family.addImport("engine_api", api);
-    family.addImport("tensorfold", engine);
+    engine.addImport("engine_api", api);
+
+    const phone_families = module(b, "zig/src/native/phone_families.zig", target, optimize);
+    phone_families.addImport("metal", metal);
+    phone_families.addImport("engine_api", api);
+    phone_families.addImport("tensorfold", engine);
+    phone_families.addImport("core", engine);
+    phone_families.addImport("living", living);
+
     const phone = b.createModule(.{ .root_source_file = b.path("src/phone_metal.zig"), .target = target, .optimize = optimize, .link_libc = true });
     phone.addImport("engine_api", api);
-    phone.addImport("qwen27_engine", detector);
-    phone.addImport("qwen35_family", family);
+    phone.addImport("phone_families", phone_families);
 
     const tokenizer = module(b, "zig/src/core/tokenizer/tokenizer.zig", target, optimize);
     const template = module(b, "zig/src/core/template/template.zig", target, optimize);
@@ -122,9 +124,44 @@ fn wireMetal(b: *std.Build, root: *std.Build.Module, target: std.Build.ResolvedT
     hf_text.addImport("dsv41_chat", dsv41);
     hf_text.addImport("uocr_chat", module(b, "zig/src/families/uocr/chat.zig", target, optimize));
     hf_text.addImport("drama_prompt", module(b, "zig/src/families/drama3/prompt.zig", target, optimize));
+    hf_text.addImport("zonos_request", module(b, "zig/src/families/zonos3/request.zig", target, optimize));
     hf_text.addImport("living", living);
+
+    const shims = b.addWriteFiles();
+    const rope_shim = b.createModule(.{
+        .root_source_file = shims.add("rope_freq_shim.zig",
+            \\const r = @import("core").rope_freq;
+            \\pub const inverseFrequencies = r.inverseFrequencies;
+            \\pub const proportional = r.proportional;
+            \\
+        ),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "core", .module = engine }},
+    });
+    const st_shim = b.createModule(.{
+        .root_source_file = shims.add("safetensors_shim.zig",
+            \\const st = @import("core").safetensors;
+            \\pub const DType = st.DType;
+            \\pub const Header = st.Header;
+            \\pub const Tensor = st.Tensor;
+            \\pub const max_rank = st.max_rank;
+            \\pub const headerSize = st.headerSize;
+            \\pub const index = st.index;
+            \\pub const parseHeader = st.parseHeader;
+            \\pub const parseHeaderPrefix = st.parseHeaderPrefix;
+            \\
+        ),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "core", .module = engine }},
+    });
+    engine.addImport("rope_freq", rope_shim);
+    engine.addImport("safetensors", st_shim);
+
     root.addImport("engine_api", api);
     root.addImport("phone_backend", phone);
+    root.addImport("tensorfold", engine);
     root.addImport("hf_text", hf_text);
     wireExisting(b, root, "mobile_threaded", mobile_io);
 
@@ -154,7 +191,6 @@ fn wireExisting(b: *std.Build, root: *std.Build.Module, name: []const u8, existi
     var walker = SharedWalker{ .b = b, .name = name, .relative = null, .seen_modules = &seen_modules, .shared = existing };
     walker.moduleTree(root);
 }
-
 
 const SharedWalker = struct {
     b: *std.Build,

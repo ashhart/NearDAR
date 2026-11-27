@@ -9,6 +9,7 @@ export interface EngineGenerationRequest {
   temperature: number
   imageBase64?: string
   temporaryImagePath?: string
+  maxImageTokens?: number
 }
 
 export interface PerceptionModule {

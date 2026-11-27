@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "NearDAR",
+    "name": "NearDar",
     "slug": "sonar",
     "scheme": "sonar",
     "version": "0.1.0",
@@ -39,7 +39,7 @@
       [
         "expo-location",
         {
-          "locationWhenInUsePermission": "Let NearDAR read your approximate location when you ask where you are.",
+          "locationWhenInUsePermission": "Let NearDar guide you with turn-by-turn walking directions, compass orientation, and offline saved places.",
           "locationAlwaysPermission": false,
           "locationAlwaysAndWhenInUsePermission": false
         }

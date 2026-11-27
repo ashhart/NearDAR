@@ -39,31 +39,95 @@ enum PerceptionVision {
   }
 
   static func people(frame: ARFrame, orientation: CGImagePropertyOrientation, timestamp: Double, settings: PerceptionSettings) throws -> [[String: Any]] {
-    let request = VNDetectHumanRectanglesRequest()
-    request.upperBodyOnly = false
+    let detected = try peopleAndAnimals(frame: frame, orientation: orientation, timestamp: timestamp, settings: settings)
+    return detected.people
+  }
+
+  /// Runs Apple Vision human + animal (dog/cat) detection in a single shared-pyramid pass on the Neural Engine.
+  static func peopleAndAnimals(
+    frame: ARFrame,
+    orientation: CGImagePropertyOrientation,
+    timestamp: Double,
+    settings: PerceptionSettings
+  ) throws -> (people: [[String: Any]], animals: [[String: Any]]) {
+    let humanRequest = VNDetectHumanRectanglesRequest()
+    humanRequest.upperBodyOnly = false
+    let animalRequest = VNRecognizeAnimalsRequest()
     let handler = VNImageRequestHandler(cvPixelBuffer: frame.capturedImage, orientation: orientation, options: [:])
-    try handler.perform([request])
-    let observations = request.results ?? []
-    return observations.compactMap { observation in
-      let bounds = sensorBounds(observation.boundingBox, orientation: orientation)
-      let center = Geometry.pointAt(nx: bounds["x"]! + bounds["width"]! / 2, ny: bounds["y"]! + bounds["height"]! / 2,
-        z: 1, intrinsics: frame.camera.intrinsics, resolution: frame.camera.imageResolution)
-      guard let measure = Geometry.measure(depth: frame.sceneDepth,
-        bounds: bounds, camera: frame.camera, orientation: orientation) else {
-        return [
-          "label": "person", "confidence": Double(observation.confidence), "source": "vision-person",
-          "cameraTimestampMs": timestamp, "bounds": bounds,
-          "direction": Geometry.direction(sensorX: center.x, sensorY: center.y, z: center.z, orientation: orientation)
-        ] as [String: Any]?
-      }
-      var object: [String: Any] = [
-        "label": "person", "confidence": Double(observation.confidence), "source": "vision-person",
-        "cameraTimestampMs": timestamp, "depthTimestampMs": timestamp, "bounds": bounds,
-        "direction": measure.direction, "distanceMeters": measure.distance, "robustDistanceMeters": measure.distance
-      ]
-      if let steps = Geometry.steps(measure.distance, settings: settings) { object["steps"] = steps }
-      return object
+    try handler.perform([humanRequest, animalRequest])
+
+    let people: [[String: Any]] = (humanRequest.results ?? []).compactMap { observation in
+      buildDetectedObject(
+        boundingBox: observation.boundingBox,
+        label: "person",
+        confidence: Double(observation.confidence),
+        source: "vision-person",
+        frame: frame,
+        orientation: orientation,
+        timestamp: timestamp,
+        settings: settings
+      )
     }
+
+    let animals: [[String: Any]] = (animalRequest.results ?? []).compactMap { observation in
+      guard let top = observation.labels.first, top.confidence >= 0.55 else { return nil }
+      let normalized = top.identifier.lowercased()
+      let label: String
+      if normalized.contains("dog") { label = "dog" }
+      else if normalized.contains("cat") { label = "cat" }
+      else { label = "animal" }
+      return buildDetectedObject(
+        boundingBox: observation.boundingBox,
+        label: label,
+        confidence: Double(top.confidence),
+        source: "vision-animal",
+        frame: frame,
+        orientation: orientation,
+        timestamp: timestamp,
+        settings: settings
+      )
+    }
+
+    return (people, animals)
+  }
+
+  private static func buildDetectedObject(
+    boundingBox: CGRect,
+    label: String,
+    confidence: Double,
+    source: String,
+    frame: ARFrame,
+    orientation: CGImagePropertyOrientation,
+    timestamp: Double,
+    settings: PerceptionSettings
+  ) -> [String: Any] {
+    let bounds = sensorBounds(boundingBox, orientation: orientation)
+    let center = Geometry.pointAt(
+      nx: bounds["x"]! + bounds["width"]! / 2,
+      ny: bounds["y"]! + bounds["height"]! / 2,
+      z: 1,
+      intrinsics: frame.camera.intrinsics,
+      resolution: frame.camera.imageResolution
+    )
+    guard let measure = Geometry.measure(
+      depth: frame.sceneDepth,
+      bounds: bounds,
+      camera: frame.camera,
+      orientation: orientation
+    ) else {
+      return [
+        "label": label, "confidence": confidence, "source": source,
+        "cameraTimestampMs": timestamp, "bounds": bounds,
+        "direction": Geometry.direction(sensorX: center.x, sensorY: center.y, z: center.z, orientation: orientation)
+      ]
+    }
+    var object: [String: Any] = [
+      "label": label, "confidence": confidence, "source": source,
+      "cameraTimestampMs": timestamp, "depthTimestampMs": timestamp, "bounds": bounds,
+      "direction": measure.direction, "distanceMeters": measure.distance, "robustDistanceMeters": measure.distance
+    ]
+    if let steps = Geometry.steps(measure.distance, settings: settings) { object["steps"] = steps }
+    return object
   }
 
   static func text(frame: ARFrame, orientation: CGImagePropertyOrientation, settings: PerceptionSettings) throws -> [[String: Any]] {

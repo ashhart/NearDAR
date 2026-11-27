@@ -8,6 +8,7 @@ export interface EngineEvent {
   status?: EngineStatus
   requestId?: string
   token?: string
+  text?: string
   message?: string
 }
 

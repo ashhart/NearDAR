@@ -1,8 +1,12 @@
 import type { Errand } from './errands'
+import type { AimState, CorridorSummary, SpatialHazard } from '../../../modules/tensorfold-perception/src'
 
 export type SessionState = 'idle' | 'starting' | 'active' | 'degraded' | 'stopping' | 'paused' | 'error'
 export type DepthState = 'unavailable' | 'starting' | 'ready' | 'stale' | 'limited' | 'lost'
 export type Direction = 'ahead' | 'ahead-left' | 'ahead-right' | 'left' | 'right' | 'behind' | 'unknown'
+export type SatnavMode = 'satnav' | 'quiet' | 'explore'
+export type TalkGesture = 'tap' | 'hold'
+export type DirectionStyle = 'natural' | 'clock'
 
 export interface SceneObject {
   id: string
@@ -24,12 +28,15 @@ export interface SeatCandidate extends SceneObject {
 export interface SceneWarning {
   id: string
   label?: string
-  kind: 'obstacle' | 'step-up' | 'step-down' | 'drop-off' | 'sensor'
+  kind: 'fast-mover' | 'obstacle' | 'head-height' | 'step-up' | 'step-down' | 'drop-off' | 'doorway' | 'sensor'
   severity: 'info' | 'caution' | 'urgent'
   message: string
   observedAt: number
   distanceMeters?: number
   direction?: Direction
+  closingSpeedMps?: number
+  externalSpeedMps?: number
+  ttcSeconds?: number
 }
 
 export interface SceneSnapshot {
@@ -45,6 +52,11 @@ export interface SceneSnapshot {
   textObservations?: { text: string; direction: Direction }[]
   imageBase64?: string
   temporaryImagePath?: string
+  corridor?: CorridorSummary
+  hazards?: SpatialHazard[]
+  headingDegrees?: number
+  aimState?: AimState
+  pitchDegrees?: number
   notes: string[]
 }
 
@@ -85,6 +97,16 @@ export interface GuidanceSettings {
   urgentHaptics: boolean
   speakerFallback: boolean
   continuousListening: boolean
+  guidanceMode: SatnavMode
+  talkGesture: TalkGesture
+  hapticSteering: boolean
+  hapticProximity: boolean
+  spatialBeacon: boolean
+  ambientObstacleNaming: boolean
+  proactiveNarration: boolean
+  directionStyle: DirectionStyle
+  oledHighContrast: boolean
+  warningDistanceMeters: number
 }
 
 export interface GuidanceReply {

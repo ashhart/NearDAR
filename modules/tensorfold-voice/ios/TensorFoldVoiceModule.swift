@@ -38,5 +38,31 @@ public final class TensorFoldVoiceModule: Module {
     AsyncFunction("stopSpeaking") {
       controller.stopSpeaking(reason: "user")
     }.runOnQueue(.main)
+
+    AsyncFunction("updateSpatialBeacon") { (options: SpatialBeaconOptions) in
+      self.controller.spatialAudio.updateBeacon(
+        active: options.active,
+        azimuthDeg: options.azimuthDeg,
+        distanceMeters: options.distanceMeters,
+        headphonesOnly: options.headphonesOnly
+      )
+      if !options.active {
+        self.controller.deactivateAudioIfIdle()
+      }
+    }.runOnQueue(.main)
+
+    AsyncFunction("playSpatialCue") { (options: SpatialCueOptions) in
+      self.controller.spatialAudio.playCue(
+        kind: options.kind,
+        azimuthDeg: options.azimuthDeg,
+        distanceMeters: options.distanceMeters,
+        elevationMeters: options.elevationMeters
+      )
+    }.runOnQueue(.main)
+
+    AsyncFunction("stopSpatialAudio") {
+      self.controller.spatialAudio.stopAll()
+      self.controller.deactivateAudioIfIdle()
+    }.runOnQueue(.main)
   }
 }

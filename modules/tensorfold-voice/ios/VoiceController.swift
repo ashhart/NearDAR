@@ -19,6 +19,7 @@ final class VoiceController: NSObject, AVSpeechSynthesizerDelegate, SFSpeechReco
   var hasEmittedSpeechStarted = false
   var pendingStart: (generation: Int, promise: Promise)?
   var utterances: [ObjectIdentifier: TrackedUtterance] = [:]
+  let spatialAudio = SpatialAudioEngine()
 
   lazy var synthesizer: AVSpeechSynthesizer = {
     let value = AVSpeechSynthesizer()
@@ -154,18 +155,20 @@ final class VoiceController: NSObject, AVSpeechSynthesizerDelegate, SFSpeechReco
     guard let raw = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
       let type = AVAudioSession.InterruptionType(rawValue: raw) else { return }
     if type == .began {
+      spatialAudio.stopAll()
       stopListening(reason: "audioInterruption")
       stopSpeaking(reason: "audioInterruption")
     }
   }
 
   private func enteredBackground() {
+    spatialAudio.stopAll()
     stopListening(reason: "appBackground")
     stopSpeaking(reason: "appBackground")
   }
 
   func deactivateAudioIfIdle() {
-    if recognitionTask == nil && pendingStart == nil && utterances.isEmpty && !synthesizer.isSpeaking && !synthesizer.isPaused {
+    if recognitionTask == nil && pendingStart == nil && utterances.isEmpty && !synthesizer.isSpeaking && !synthesizer.isPaused && !spatialAudio.isActive {
       VoiceAudio.deactivate()
     }
   }
@@ -173,6 +176,7 @@ final class VoiceController: NSObject, AVSpeechSynthesizerDelegate, SFSpeechReco
   func shutdown() {
     observers.forEach(NotificationCenter.default.removeObserver)
     observers.removeAll()
+    spatialAudio.stopAll()
     stopListening(reason: "destroyed")
     stopSpeaking(reason: "destroyed")
   }
