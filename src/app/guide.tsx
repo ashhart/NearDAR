@@ -14,14 +14,15 @@ import {
   type ViewProps,
 } from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
-import { router } from 'expo-router'
+import { router, useLocalSearchParams } from 'expo-router'
 import { requireNativeViewManager } from 'expo-modules-core'
-import { Body, Button, Icon, Label, Signal, useColors } from '../components/ui'
+import { Body, Button, Icon, Label, Signal, useColors, type IconName } from '../components/ui'
 import { RadarHud } from '../components/RadarHud'
 import { useSatnav } from '../lib/satnav/useSatnav'
 import { useAppSettings } from '../lib/SettingsContext'
 import { formatWalkingDistance } from '../lib/navigation/geo'
 import { MOBILITY_SKILLS } from '../lib/satnav/modes'
+import { getWebDemoOverride } from '../lib/satnav/webDemo'
 import type { SatnavMode } from '../lib/guidance/types'
 
 function CameraPreview(props: ViewProps) {
@@ -30,20 +31,68 @@ function CameraPreview(props: ViewProps) {
 }
 
 const MODE_LABELS: Record<SatnavMode, string> = {
-  satnav: 'Full Satnav',
-  quiet: 'Quiet Haptics',
+  satnav: 'Satnav',
+  quiet: 'Quiet',
   explore: 'Explore',
+}
+
+function SkillTile({
+  icon,
+  label,
+  active = false,
+  onPress,
+}: {
+  icon: IconName
+  label: string
+  active?: boolean
+  onPress(): void
+}) {
+  const colors = useColors()
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={label}
+      accessibilityState={{ selected: active }}
+      onPress={onPress}
+      style={({ pressed }) => [
+        styles.skillTile,
+        {
+          backgroundColor: active ? colors.accentSoft : colors.raised,
+          borderColor: active ? colors.accent : 'transparent',
+        },
+        pressed && styles.pressed,
+      ]}
+    >
+      <View style={[styles.skillTileIcon, { backgroundColor: active ? colors.accent : colors.panel }]}>
+        <Icon name={icon} size={20} color={active ? colors.ink : colors.accent} />
+      </View>
+      <Text numberOfLines={1} style={[styles.skillTileLabel, { color: colors.text }]}>
+        {label}
+      </Text>
+    </Pressable>
+  )
 }
 
 export default function SatnavGuide() {
   const satnav = useSatnav()
-  const { settings } = useAppSettings()
+  const { settings, update } = useAppSettings()
+  const params = useLocalSearchParams<{ demo?: string }>()
+  const webDemo = Platform.OS === 'web' ? getWebDemoOverride(typeof params.demo === 'string' ? params.demo : undefined) : undefined
   const colors = useColors()
 
-  const [navSheetOpen, setNavSheetOpen] = useState(false)
+  const [navSheetOpen, setNavSheetOpen] = useState(Boolean(webDemo?.openSheet))
   const [destinationInput, setDestinationInput] = useState('')
   const [placeNameInput, setPlaceNameInput] = useState('')
   const [showCameraPreview, setShowCameraPreview] = useState(false)
+
+  useEffect(() => {
+    if (!webDemo) return
+    const wantOled = Boolean(webDemo.forceOled)
+    if (wantOled !== settings.oledHighContrast) {
+      void update({ oledHighContrast: wantOled })
+    }
+    setNavSheetOpen(Boolean(webDemo.openSheet))
+  }, [webDemo, settings.oledHighContrast, update])
 
   const autoStartedRef = useRef(false)
   const lastTapAtRef = useRef(0)
@@ -108,7 +157,6 @@ export default function SatnavGuide() {
         void satnavRef.current.endTalk()
         return
       }
-      // Horizontal swipe switches guidance mode
       if (Math.abs(gesture.dx) >= 70 && Math.abs(gesture.dx) > Math.abs(gesture.dy) * 1.4) {
         if (tapTimerRef.current) {
           clearTimeout(tapTimerRef.current)
@@ -117,7 +165,6 @@ export default function SatnavGuide() {
         void satnavRef.current.cycleMode(gesture.dx > 0 ? 1 : -1)
         return
       }
-      // Vertical swipe up -> instant TensorFold scan ahead (zero-talk)
       if (gesture.dy <= -75 && Math.abs(gesture.dy) > Math.abs(gesture.dx) * 1.4) {
         if (tapTimerRef.current) {
           clearTimeout(tapTimerRef.current)
@@ -126,7 +173,6 @@ export default function SatnavGuide() {
         void satnavRef.current.quickScanAhead()
         return
       }
-      // Vertical swipe down -> calm street, heading, and surroundings orientation (zero-talk)
       if (gesture.dy >= 75 && Math.abs(gesture.dy) > Math.abs(gesture.dx) * 1.4) {
         if (tapTimerRef.current) {
           clearTimeout(tapTimerRef.current)
@@ -135,7 +181,6 @@ export default function SatnavGuide() {
         void satnavRef.current.orientMe(true)
         return
       }
-      // Tap / Double-tap disambiguation
       if (Math.abs(gesture.dx) < 20 && Math.abs(gesture.dy) < 20) {
         const now = Date.now()
         if (now - lastTapAtRef.current <= 300) {
@@ -162,21 +207,30 @@ export default function SatnavGuide() {
     },
   }), [])
 
-  const route = satnav.routeProgress
+  const isActive = webDemo ? true : satnav.active
+  const isCameraReady = webDemo ? true : satnav.cameraReady
+  const liveSnapshot = webDemo?.snapshot ?? satnav.snapshot
+  const liveFused = webDemo?.fused ?? satnav.fused
+  const liveHeading = webDemo?.headingDegrees ?? satnav.headingDegrees
+  const liveSkill = webDemo?.activeSkill ?? satnav.activeSkill
+  const route = webDemo?.routeProgress ?? satnav.routeProgress
   const routeActive = Boolean(route && route.active && !route.arrived)
-  const headphones = satnav.voice?.route === 'headphones'
+  const headphones = webDemo ? webDemo.headphones : satnav.voice?.route === 'headphones'
+  const urgentAlert = liveFused.primaryHazard?.severity === 'urgent'
 
   const primaryCaption = satnav.listening
     ? (satnav.partialTranscript ? `“${satnav.partialTranscript}”` : 'Listening… ask anything or say a destination.')
     : satnav.thinking
       ? (satnav.lastReply?.text || 'Looking at what is ahead…')
-      : satnav.lastReply?.text || satnav.fused.summary || satnav.statusMessage
+      : webDemo?.caption || satnav.lastReply?.text || liveFused.summary || satnav.statusMessage
 
   const canvasAccessibilityLabel = [
-    satnav.active ? `${MODE_LABELS[satnav.mode]} active.` : 'Satnav paused.',
-    routeActive && route ? `Route to ${route.route.destinationName}, ${formatWalkingDistance(route.remainingDistanceMeters, settings.stepLengthMeters, settings.distanceUnit)} left. ${route.currentStep.instruction}.` : '',
-    satnav.activeSkill !== 'none' ? `${MOBILITY_SKILLS[satnav.activeSkill].label} active.` : '',
-    satnav.fused.summary,
+    isActive ? `${MODE_LABELS[satnav.mode]} mode active.` : 'Satnav paused.',
+    routeActive && route
+      ? `Route to ${route.route.destinationName}, ${formatWalkingDistance(route.remainingDistanceMeters, settings.stepLengthMeters, settings.distanceUnit)} left. ${route.currentStep.instruction}.`
+      : '',
+    liveSkill !== 'none' ? `${MOBILITY_SKILLS[liveSkill].label} active.` : '',
+    liveFused.summary,
     satnav.lastReply?.text ? `Last message: ${satnav.lastReply.text}` : '',
   ].filter(Boolean).join(' ')
 
@@ -213,7 +267,7 @@ export default function SatnavGuide() {
             onPress={() => void satnav.toggleScreenCurtain(false)}
             style={styles.curtainLiftBtn}
           >
-            <Text style={styles.curtainLiftText}>Screen Curtain On · Tap to Show Screen</Text>
+            <Text style={styles.curtainLiftText}>Screen Curtain · Tap to Reveal</Text>
           </Pressable>
         </View>
       </SafeAreaView>
@@ -223,73 +277,115 @@ export default function SatnavGuide() {
   return (
     <SafeAreaView style={[styles.safe, { backgroundColor: colors.background }]}>
       <View style={styles.shell}>
-        {/* Compact Top Bar */}
+        {/* Sleek Single-Row Header */}
         <View style={styles.topBar}>
-          <View style={styles.topStatus}>
-            <Signal tone={satnav.active ? (satnav.fused.standby ? 'quiet' : satnav.cameraReady ? 'ready' : 'attention') : 'quiet'}>
-              {satnav.active ? (satnav.fused.standby ? 'Standby' : satnav.cameraReady ? 'LiDAR Live' : 'Starting') : 'Paused'}
+          <View style={styles.topPills}>
+            <Signal tone={isActive ? (liveFused.standby ? 'quiet' : isCameraReady ? 'ready' : 'attention') : 'quiet'}>
+              {isActive ? (liveFused.standby ? 'Standby' : isCameraReady ? 'LiDAR' : 'Starting') : 'Paused'}
             </Signal>
+
             <Pressable
               accessibilityRole="button"
               accessibilityLabel={`Guidance mode: ${MODE_LABELS[satnav.mode]}. Activate to switch mode.`}
               onPress={() => void satnav.cycleMode(1)}
-              style={[styles.pill, { backgroundColor: colors.raised, borderColor: colors.border }]}
+              style={({ pressed }) => [
+                styles.modePill,
+                { backgroundColor: colors.panel, borderColor: colors.border },
+                pressed && styles.pressed,
+              ]}
             >
-              <Text style={[styles.pillText, { color: colors.text }]}>{MODE_LABELS[satnav.mode]}</Text>
+              <Text style={[styles.modePillText, { color: colors.text }]}>{MODE_LABELS[satnav.mode]}</Text>
             </Pressable>
+
             {headphones && settings.spatialBeacon && (
-              <View accessible accessibilityLabel="3D headphone spatial beacon active" style={[styles.pill, { backgroundColor: colors.panel, borderColor: colors.divider }]}>
+              <View
+                accessible
+                accessibilityLabel="3D headphone spatial beacon active"
+                style={[styles.spatialBadge, { backgroundColor: colors.accentSoft }]}
+              >
                 <Icon name="headset-outline" size={14} color={colors.accent} />
-                <Text style={[styles.pillText, { color: colors.accent }]}>3D</Text>
+                <Text style={[styles.spatialBadgeText, { color: colors.accent }]}>3D</Text>
               </View>
             )}
           </View>
 
-          <Button compact secondary icon="settings-outline" label="Settings" onPress={openSettings} />
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Settings"
+            onPress={openSettings}
+            style={({ pressed }) => [
+              styles.settingsCircle,
+              { backgroundColor: colors.panel, borderColor: colors.border },
+              pressed && styles.pressed,
+            ]}
+          >
+            <Icon name="settings-outline" size={20} color={colors.text} />
+          </Pressable>
         </View>
 
-        {/* Active Route Maneuver Banner */}
+        {/* Sleek Walking Turn-by-Turn Strip */}
         {routeActive && route && (
-          <View style={[styles.routeCard, { backgroundColor: colors.raised, borderColor: colors.accent }]}>
-            <View style={styles.routeHeader}>
-              <View style={styles.routeMeta}>
+          <View style={[styles.routeCard, { backgroundColor: colors.panel, borderColor: colors.divider }]}>
+            <View style={[styles.routeIconWrap, { backgroundColor: colors.accentSoft }]}>
+              <Icon name="navigate" size={20} color={colors.accent} />
+            </View>
+            <View style={styles.routeBody}>
+              <View style={styles.routeTitleRow}>
                 <Text numberOfLines={1} style={[styles.routeDest, { color: colors.text }]}>
                   {route.route.destinationName}
                 </Text>
                 <Text style={[styles.routeDist, { color: colors.accent }]}>
-                  {formatWalkingDistance(route.remainingDistanceMeters, settings.stepLengthMeters, settings.distanceUnit)} left
-                  {route.route.source !== 'mapkit' ? ' · Offline' : ''}
+                  {formatWalkingDistance(route.remainingDistanceMeters, settings.stepLengthMeters, settings.distanceUnit)}
                 </Text>
               </View>
-              <Button compact secondary label="End" onPress={() => void satnav.cancelRoute()} />
+              <Text numberOfLines={2} style={[styles.routeStep, { color: colors.muted }]}>
+                {route.offRoute ? 'Off route — follow the beacon to rejoin.' : route.currentStep.instruction}
+              </Text>
             </View>
-            <Text style={[styles.routeStep, { color: colors.text }]}>
-              {route.offRoute ? 'Off route — follow the beacon to rejoin.' : route.currentStep.instruction}
-            </Text>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="End walking route"
+              onPress={() => void satnav.cancelRoute()}
+              style={({ pressed }) => [styles.routeClose, { backgroundColor: colors.raised }, pressed && styles.pressed]}
+            >
+              <Icon name="close" size={16} color={colors.muted} />
+            </Pressable>
           </View>
         )}
 
-        {/* Active Mobility Skill Bar (Door Finder, Crossing, Bus Watcher, Vivid Scene) */}
-        {satnav.activeSkill !== 'none' && (
-          <View style={[styles.skillBar, { backgroundColor: colors.raised, borderColor: colors.accent }]}>
-            <Text numberOfLines={1} style={[styles.skillLabel, { color: colors.text }]}>
-              {satnav.activeSkill === 'transit' && satnav.watchedBus
-                ? `Watching for Bus ${satnav.watchedBus}`
-                : MOBILITY_SKILLS[satnav.activeSkill].label}
-            </Text>
-            <View style={styles.skillActions}>
-              <Button
-                compact
-                secondary
-                label="Re-scan"
-                onPress={() => void satnav.runSkill(satnav.activeSkill === 'none' ? 'door-finder' : satnav.activeSkill, satnav.watchedBus)}
-              />
-              <Button compact secondary label="Done" onPress={satnav.clearSkill} />
+        {/* Compact Active Skill Strip */}
+        {liveSkill !== 'none' && (
+          <View style={[styles.skillStrip, { backgroundColor: colors.accentSoft }]}>
+            <View style={styles.skillStripLeft}>
+              <Icon name="sparkles" size={15} color={colors.accent} />
+              <Text numberOfLines={1} style={[styles.skillStripText, { color: colors.accent }]}>
+                {liveSkill === 'transit' && satnav.watchedBus
+                  ? `Watching Bus ${satnav.watchedBus}`
+                  : MOBILITY_SKILLS[liveSkill].label}
+              </Text>
+            </View>
+            <View style={styles.skillStripActions}>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Re-scan"
+                onPress={() => void satnav.runSkill(liveSkill, satnav.watchedBus)}
+                style={[styles.miniPill, { backgroundColor: colors.panel }]}
+              >
+                <Text style={[styles.miniPillText, { color: colors.text }]}>Scan</Text>
+              </Pressable>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Close assistant"
+                onPress={satnav.clearSkill}
+                style={[styles.miniPill, { backgroundColor: colors.panel }]}
+              >
+                <Text style={[styles.miniPillText, { color: colors.muted }]}>Done</Text>
+              </Pressable>
             </View>
           </View>
         )}
 
-        {/* Full-Screen Eyes-Free Gesture Canvas */}
+        {/* Unified Eyes-Free Spatial Stage (Single Clean Surface, Zero Nested Wireframes) */}
         <View
           {...panResponder.panHandlers}
           accessible
@@ -321,47 +417,50 @@ export default function SatnavGuide() {
             }
           }}
           style={[
-            styles.canvas,
+            styles.stage,
             {
-              backgroundColor: satnav.listening ? colors.raised : colors.panel,
-              borderColor: satnav.listening ? colors.accent : satnav.fused.primaryHazard?.severity === 'urgent' ? colors.stop : colors.divider,
+              backgroundColor: urgentAlert ? colors.stopSurface : colors.panel,
+              borderColor: satnav.listening ? colors.accent : urgentAlert ? colors.stop : colors.divider,
+              borderWidth: satnav.listening || urgentAlert ? 1.5 : StyleSheet.hairlineWidth,
             },
           ]}
         >
           <RadarHud
-            corridor={satnav.snapshot?.corridor}
-            snapshot={satnav.snapshot}
-            fused={satnav.fused}
-            headingDegrees={satnav.headingDegrees}
+            corridor={liveSnapshot?.corridor}
+            snapshot={liveSnapshot}
+            fused={liveFused}
+            headingDegrees={liveHeading}
             distanceUnit={settings.distanceUnit}
-            active={satnav.active}
+            active={isActive}
           />
 
-          <View style={styles.captionZone}>
-            <View style={styles.stateChip}>
-              <Icon
-                name={satnav.listening ? 'mic' : satnav.thinking ? 'sparkles' : satnav.speaking ? 'volume-high' : 'hand-left-outline'}
-                size={18}
-                color={satnav.listening ? colors.accent : colors.muted}
-              />
-              <Text style={[styles.stateChipText, { color: satnav.listening ? colors.accent : colors.muted }]}>
-                {satnav.listening
-                  ? 'Listening (tap again to finish)'
-                  : satnav.thinking
-                    ? (satnav.usingTensorFoldEngine ? 'TensorFold analyzing view…' : 'On-device vision analyzing…')
-                    : satnav.speaking
-                      ? 'Speaking (tap to interrupt)'
-                      : satnav.fused.standby
-                        ? 'Camera lowered · Tap to talk'
-                        : settings.talkGesture === 'hold'
-                          ? 'Hold anywhere to talk · Swipe for mode'
-                          : 'Tap to talk · Swipe up scan · Down orient'}
-              </Text>
-            </View>
+          <View style={[styles.stageDivider, { backgroundColor: colors.divider }]} />
 
-            <Text style={[styles.captionText, { color: colors.text }]} numberOfLines={5}>
+          <View style={styles.captionZone}>
+            <Text style={[styles.captionText, { color: colors.text }]} numberOfLines={4}>
               {primaryCaption}
             </Text>
+
+            <View style={styles.gestureHintRow}>
+              <Icon
+                name={satnav.listening ? 'mic' : satnav.thinking ? 'sparkles' : satnav.speaking ? 'volume-high' : 'radio-outline'}
+                size={14}
+                color={satnav.listening ? colors.accent : colors.muted}
+              />
+              <Text style={[styles.gestureHintText, { color: satnav.listening ? colors.accent : colors.muted }]}>
+                {satnav.listening
+                  ? 'Listening · tap to send'
+                  : satnav.thinking
+                    ? (satnav.usingTensorFoldEngine ? 'TensorFold analyzing…' : 'Analyzing view…')
+                    : satnav.speaking
+                      ? 'Speaking · tap to interrupt'
+                      : liveFused.standby
+                        ? 'Lowered · tap anywhere to talk'
+                        : settings.talkGesture === 'hold'
+                          ? 'Hold to talk · swipe for mode'
+                          : 'Tap to talk · swipe up scan · down orient'}
+              </Text>
+            </View>
 
             {satnav.voiceNotice && (
               <Text style={[styles.noticeText, { color: colors.warning }]}>{satnav.voiceNotice}</Text>
@@ -379,7 +478,7 @@ export default function SatnavGuide() {
           )}
         </View>
 
-        {/* Permission or Vision Download Helper Row (only when needed) */}
+        {/* Inline Setup / Permission Pills (Only when needed) */}
         {satnav.cameraPermissionBlocked && Platform.OS !== 'web' && (
           <Button secondary icon="settings-outline" label="Allow Camera in iOS Settings" onPress={() => void Linking.openSettings().catch(() => {})} />
         )}
@@ -396,16 +495,19 @@ export default function SatnavGuide() {
           <Button compact secondary icon="download-outline" label="Download offline speech" busy={satnav.speechDownloadPending} onPress={() => void satnav.downloadOfflineSpeech()} />
         )}
 
-        {/* Minimal 3-Button Bottom Dock */}
-        <View style={[styles.dock, { borderTopColor: colors.divider }]}>
+        {/* Modern Floating Control Dock */}
+        <View style={styles.dock}>
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel="Navigate to a destination or saved place"
+            accessibilityLabel="Navigate and Street Assistants"
             onPress={() => setNavSheetOpen(true)}
-            style={({ pressed }) => [styles.dockBtn, { backgroundColor: colors.panel, borderColor: colors.border }, pressed && styles.pressed]}
+            style={({ pressed }) => [
+              styles.dockSide,
+              { backgroundColor: colors.panel, borderColor: colors.border },
+              pressed && styles.pressed,
+            ]}
           >
-            <Icon name="navigate-outline" size={24} color={colors.text} />
-            <Text style={[styles.dockLabel, { color: colors.text }]}>Navigate</Text>
+            <Icon name="compass-outline" size={24} color={colors.text} />
           </Pressable>
 
           <Pressable
@@ -415,121 +517,129 @@ export default function SatnavGuide() {
             onPressIn={() => { if (settings.talkGesture === 'hold') void satnav.beginTalk() }}
             onPressOut={() => { if (settings.talkGesture === 'hold') void satnav.endTalk() }}
             style={({ pressed }) => [
-              styles.dockPrimary,
+              styles.dockTalk,
               { backgroundColor: satnav.listening ? colors.stop : colors.accent },
               pressed && styles.pressed,
             ]}
           >
-            <Icon name={satnav.listening ? 'mic' : 'mic-outline'} size={28} color={colors.ink} />
-            <Text style={[styles.dockPrimaryLabel, { color: colors.ink }]}>
+            <Icon name={satnav.listening ? 'mic' : 'mic-outline'} size={24} color={satnav.listening ? '#FFFFFF' : colors.ink} />
+            <Text style={[styles.dockTalkText, { color: satnav.listening ? '#FFFFFF' : colors.ink }]}>
               {satnav.listening ? 'Listening' : 'Talk'}
             </Text>
           </Pressable>
 
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel={satnav.active ? 'Pause satnav and sensors' : 'Resume satnav and sensors'}
+            accessibilityLabel={isActive ? 'Pause satnav and sensors' : 'Resume satnav and sensors'}
             onPress={() => void satnav.togglePause()}
             style={({ pressed }) => [
-              styles.dockBtn,
-              { backgroundColor: satnav.active ? colors.stopSurface : colors.raised, borderColor: satnav.active ? colors.stop : colors.accent },
+              styles.dockSide,
+              {
+                backgroundColor: isActive ? colors.panel : colors.accentSoft,
+                borderColor: isActive ? colors.border : colors.accent,
+              },
               pressed && styles.pressed,
             ]}
           >
-            <Icon name={satnav.active ? 'pause-circle-outline' : 'play-circle-outline'} size={24} color={satnav.active ? colors.stop : colors.accent} />
-            <Text style={[styles.dockLabel, { color: satnav.active ? colors.stop : colors.accent }]}>
-              {satnav.active ? 'Pause' : 'Start'}
-            </Text>
+            <Icon
+              name={isActive ? 'pause' : 'play'}
+              size={22}
+              color={isActive ? colors.text : colors.accent}
+            />
           </Pressable>
         </View>
       </View>
 
-      {/* Accessible Destination & Offline Places Sheet */}
+      {/* Accessible Navigation & Street Assistants Sheet */}
       <Modal
         visible={navSheetOpen}
-        animationType="slide"
+        animationType={webDemo?.openSheet ? 'none' : 'slide'}
         presentationStyle="pageSheet"
         onRequestClose={() => setNavSheetOpen(false)}
       >
         <SafeAreaView style={[styles.modalSafe, { backgroundColor: colors.background }]}>
           <View style={styles.modalHeader}>
-            <Label>Navigate</Label>
-            <Button compact secondary label="Close" onPress={() => setNavSheetOpen(false)} />
+            <Text style={[styles.modalTitle, { color: colors.text }]}>Explore &amp; Navigate</Text>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Close"
+              onPress={() => setNavSheetOpen(false)}
+              style={({ pressed }) => [
+                styles.modalClose,
+                { backgroundColor: colors.panel, borderColor: colors.border },
+                pressed && styles.pressed,
+              ]}
+            >
+              <Icon name="close" size={20} color={colors.text} />
+            </Pressable>
           </View>
-          <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={styles.modalBody}>
+
+          <ScrollView keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false} contentContainerStyle={styles.modalBody}>
+            {/* Go to a Place */}
             <View style={[styles.modalCard, { backgroundColor: colors.panel, borderColor: colors.divider }]}>
-              <Label>Go to a place</Label>
-              <Body muted>Type a destination or say “Take me to…” anytime from the main screen.</Body>
+              <Text style={[styles.sectionEyebrow, { color: colors.muted }]}>WALKING ROUTE</Text>
               <TextInput
                 accessibilityLabel="Destination address or place name"
                 value={destinationInput}
                 onChangeText={setDestinationInput}
                 onSubmitEditing={handleSubmitDestination}
                 returnKeyType="go"
-                placeholder="Nearest pharmacy, Costa Coffee, Home…"
+                placeholder="Pharmacy, coffee shop, station…"
                 placeholderTextColor={colors.muted}
                 style={[styles.input, { color: colors.text, borderColor: colors.border, backgroundColor: colors.background }]}
               />
-              <Button icon="navigate-outline" label="Start Walking Route" disabled={!destinationInput.trim()} onPress={handleSubmitDestination} />
+              <Button icon="navigate" label="Start Walking Route" disabled={!destinationInput.trim()} onPress={handleSubmitDestination} />
             </View>
 
-            {/* Quick Street Assistants & Everyday Companion Skills */}
+            {/* Symmetrical 2-Column Street Assistants Grid */}
             <View style={[styles.modalCard, { backgroundColor: colors.panel, borderColor: colors.divider }]}>
-              <Label>Street Assistants</Label>
-              <Body muted>One tap or say “find the door”, “help me cross”, “watch for bus 73”, or “describe the view”.</Body>
+              <Text style={[styles.sectionEyebrow, { color: colors.muted }]}>STREET ASSISTANTS</Text>
               <View style={styles.skillGrid}>
-                <Button
-                  compact
-                  secondary
+                <SkillTile
                   icon="enter-outline"
-                  label="Find the door"
+                  label="Find Door"
+                  active={liveSkill === 'door-finder'}
                   onPress={() => {
                     setNavSheetOpen(false)
                     void satnav.runSkill('door-finder', route?.route.destinationName)
                   }}
                 />
-                <Button
-                  compact
-                  secondary
+                <SkillTile
                   icon="walk-outline"
-                  label="Crossing assistant"
+                  label="Crossing"
+                  active={liveSkill === 'crossing'}
                   onPress={() => {
                     setNavSheetOpen(false)
                     void satnav.runSkill('crossing')
                   }}
                 />
-                <Button
-                  compact
-                  secondary
+                <SkillTile
                   icon="bus-outline"
-                  label="Transit / Bus"
+                  label="Transit"
+                  active={liveSkill === 'transit'}
                   onPress={() => {
                     setNavSheetOpen(false)
                     void satnav.runSkill('transit')
                   }}
                 />
-                <Button
-                  compact
-                  secondary
-                  icon="color-palette-outline"
-                  label="Describe view"
+                <SkillTile
+                  icon="sparkles-outline"
+                  label="Vivid View"
+                  active={liveSkill === 'vivid'}
                   onPress={() => {
                     setNavSheetOpen(false)
                     void satnav.runSkill('vivid')
                   }}
                 />
-                <Button
-                  compact
-                  secondary
+                <SkillTile
                   icon="flashlight-outline"
-                  label={satnav.torchEnabled ? 'Torch off' : 'Torch on'}
+                  label={satnav.torchEnabled ? 'Torch On' : 'Torch'}
+                  active={satnav.torchEnabled}
                   onPress={() => void satnav.toggleTorch()}
                 />
-                <Button
-                  compact
-                  secondary
+                <SkillTile
                   icon="share-social-outline"
-                  label="Share location"
+                  label="Share Pin"
                   onPress={() => {
                     setNavSheetOpen(false)
                     void satnav.shareLocationWithContact()
@@ -538,12 +648,9 @@ export default function SatnavGuide() {
               </View>
             </View>
 
-            {/* Quick Orientation & Offline Return */}
+            {/* Orientation & Offline Return */}
             <View style={[styles.modalCard, { backgroundColor: colors.panel, borderColor: colors.divider }]}>
-              <Label>Get Your Bearings</Label>
-              <Body muted>
-                Hear your street address, compass heading, and what is immediately around you—or trace your breadcrumbs back offline.
-              </Body>
+              <Text style={[styles.sectionEyebrow, { color: colors.muted }]}>ORIENTATION &amp; SAFETY</Text>
               <Button
                 secondary
                 icon="compass-outline"
@@ -556,7 +663,7 @@ export default function SatnavGuide() {
               <Button
                 secondary
                 icon="return-up-back-outline"
-                label={satnav.breadcrumbCount >= 2 ? `Take me back (${satnav.breadcrumbCount} breadcrumbs)` : 'Take me back to where I started'}
+                label={satnav.breadcrumbCount >= 2 ? `Take me back (${satnav.breadcrumbCount} crumbs)` : 'Trace path back offline'}
                 disabled={satnav.breadcrumbCount < 2}
                 onPress={() => {
                   setNavSheetOpen(false)
@@ -565,11 +672,11 @@ export default function SatnavGuide() {
               />
             </View>
 
-            {/* Saved Places (Offline-ready) */}
+            {/* Saved Places */}
             <View style={[styles.modalCard, { backgroundColor: colors.panel, borderColor: colors.divider }]}>
-              <Label>Saved Places (Works Offline)</Label>
+              <Label>Saved Places</Label>
               {satnav.savedPlaces.length === 0 ? (
-                <Body muted>No saved places yet. Save where you are standing now for offline beacon and route guidance.</Body>
+                <Body muted>Bookmark where you stand for offline compass and walking guidance.</Body>
               ) : (
                 satnav.savedPlaces.map((place) => (
                   <Button
@@ -594,7 +701,7 @@ export default function SatnavGuide() {
                 placeholderTextColor={colors.muted}
                 style={[styles.input, { color: colors.text, borderColor: colors.border, backgroundColor: colors.background }]}
               />
-              <Button compact secondary icon="bookmark-outline" label="Save Current Location" disabled={!placeNameInput.trim()} onPress={handleSavePlace} />
+              <Button compact secondary icon="bookmark-outline" label="Save Spot" disabled={!placeNameInput.trim()} onPress={handleSavePlace} />
             </View>
 
             {satnav.active && satnav.cameraPreviewAvailable && (
@@ -602,7 +709,7 @@ export default function SatnavGuide() {
                 compact
                 secondary
                 icon="eye-outline"
-                label={showCameraPreview ? 'Hide sighted camera preview' : 'Show sighted camera preview'}
+                label={showCameraPreview ? 'Hide camera preview' : 'Show camera preview'}
                 onPress={() => setShowCameraPreview(!showCameraPreview)}
               />
             )}
@@ -615,41 +722,219 @@ export default function SatnavGuide() {
 
 const styles = StyleSheet.create({
   safe: { flex: 1 },
-  shell: { flex: 1, width: '100%', maxWidth: 560, alignSelf: 'center', paddingHorizontal: 16, paddingTop: 8, paddingBottom: 10, gap: 12 },
-  topBar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
-  topStatus: { flexDirection: 'row', alignItems: 'center', gap: 8, flexWrap: 'wrap', flex: 1 },
-  pill: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 10, paddingVertical: 6, borderRadius: 12, borderWidth: 1 },
-  pillText: { fontSize: 13, fontWeight: '700' },
-  routeCard: { borderRadius: 18, borderWidth: 1.5, padding: 14, gap: 6 },
-  routeHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10 },
-  routeMeta: { flex: 1, gap: 2 },
-  routeDest: { fontSize: 19, fontWeight: '800' },
-  routeDist: { fontSize: 14, fontWeight: '700' },
-  routeStep: { fontSize: 17, lineHeight: 23, fontWeight: '600' },
-  canvas: { flex: 1, borderRadius: 26, borderWidth: 2, padding: 16, justifyContent: 'space-between', gap: 14 },
-  captionZone: { flex: 1, justifyContent: 'center', gap: 10 },
-  stateChip: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  stateChipText: { fontSize: 14, fontWeight: '700' },
-  captionText: { fontSize: 23, lineHeight: 31, fontWeight: '700' },
-  noticeText: { fontSize: 15, lineHeight: 21, fontWeight: '600' },
-  cameraPreview: { width: '100%', height: 140, borderRadius: 14, overflow: 'hidden', backgroundColor: '#000' },
-  dock: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingTop: 10, borderTopWidth: 1 },
-  dockBtn: { flex: 1, minHeight: 68, borderRadius: 18, borderWidth: 1.5, alignItems: 'center', justifyContent: 'center', gap: 4, paddingHorizontal: 8 },
-  dockPrimary: { flex: 1.35, minHeight: 72, borderRadius: 22, alignItems: 'center', justifyContent: 'center', gap: 3, paddingHorizontal: 10 },
-  dockLabel: { fontSize: 14, fontWeight: '700' },
-  dockPrimaryLabel: { fontSize: 16, fontWeight: '800' },
-  pressed: { opacity: 0.8 },
+  shell: {
+    flex: 1,
+    width: '100%',
+    maxWidth: 520,
+    alignSelf: 'center',
+    paddingHorizontal: 16,
+    paddingTop: 8,
+    paddingBottom: 14,
+    gap: 12,
+  },
+  topBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 8,
+    minHeight: 42,
+  },
+  topPills: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    flex: 1,
+  },
+  modePill: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 999,
+    borderWidth: StyleSheet.hairlineWidth,
+  },
+  modePillText: {
+    fontSize: 13,
+    fontWeight: '700',
+    letterSpacing: -0.1,
+  },
+  spatialBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 9,
+    paddingVertical: 6,
+    borderRadius: 999,
+  },
+  spatialBadgeText: {
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  settingsCircle: {
+    width: 40,
+    height: 40,
+    borderRadius: 999,
+    borderWidth: StyleSheet.hairlineWidth,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  routeCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    padding: 14,
+    borderRadius: 20,
+    borderWidth: StyleSheet.hairlineWidth,
+  },
+  routeIconWrap: {
+    width: 40,
+    height: 40,
+    borderRadius: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  routeBody: { flex: 1, gap: 3 },
+  routeTitleRow: { flexDirection: 'row', alignItems: 'baseline', justifyContent: 'space-between', gap: 8 },
+  routeDest: { fontSize: 16, fontWeight: '800', letterSpacing: -0.3, flex: 1 },
+  routeDist: { fontSize: 14, fontWeight: '800', fontVariant: ['tabular-nums'] },
+  routeStep: { fontSize: 14, lineHeight: 19, fontWeight: '500' },
+  routeClose: {
+    width: 30,
+    height: 30,
+    borderRadius: 999,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  skillStrip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 9,
+    borderRadius: 16,
+  },
+  skillStripLeft: { flexDirection: 'row', alignItems: 'center', gap: 7, flex: 1 },
+  skillStripText: { fontSize: 14, fontWeight: '800', letterSpacing: -0.1, flex: 1 },
+  skillStripActions: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  miniPill: { paddingHorizontal: 11, paddingVertical: 5, borderRadius: 999 },
+  miniPillText: { fontSize: 12, fontWeight: '700' },
+  stage: {
+    flex: 1,
+    borderRadius: 28,
+    padding: 20,
+    justifyContent: 'space-between',
+    gap: 16,
+  },
+  stageDivider: {
+    height: StyleSheet.hairlineWidth,
+    width: '100%',
+  },
+  captionZone: {
+    flex: 1,
+    justifyContent: 'center',
+    gap: 12,
+  },
+  captionText: {
+    fontSize: 22,
+    lineHeight: 30,
+    fontWeight: '700',
+    letterSpacing: -0.4,
+  },
+  gestureHintRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  gestureHintText: {
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  noticeText: { fontSize: 14, lineHeight: 20, fontWeight: '600' },
+  cameraPreview: { width: '100%', height: 132, borderRadius: 16, overflow: 'hidden', backgroundColor: '#000' },
+  dock: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    paddingTop: 2,
+  },
+  dockSide: {
+    width: 58,
+    height: 58,
+    borderRadius: 999,
+    borderWidth: StyleSheet.hairlineWidth,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  dockTalk: {
+    flex: 1,
+    height: 58,
+    borderRadius: 999,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+  },
+  dockTalkText: {
+    fontSize: 17,
+    fontWeight: '800',
+    letterSpacing: -0.2,
+  },
+  pressed: { opacity: 0.78, transform: [{ scale: 0.98 }] },
   modalSafe: { flex: 1 },
-  modalHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 20, paddingVertical: 14 },
-  modalBody: { paddingHorizontal: 20, paddingBottom: 32, gap: 16 },
-  modalCard: { borderRadius: 20, borderWidth: 1, padding: 16, gap: 12 },
-  input: { minHeight: 54, fontSize: 18, paddingHorizontal: 14, borderRadius: 14, borderWidth: 1.5 },
-  skillBar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10, paddingHorizontal: 14, paddingVertical: 10, borderRadius: 16, borderWidth: 1.5 },
-  skillLabel: { fontSize: 16, fontWeight: '800', flex: 1 },
-  skillActions: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  skillGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  modalHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 20,
+    paddingVertical: 14,
+  },
+  modalTitle: { fontSize: 24, fontWeight: '800', letterSpacing: -0.6 },
+  modalClose: {
+    width: 38,
+    height: 38,
+    borderRadius: 999,
+    borderWidth: StyleSheet.hairlineWidth,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  modalBody: { paddingHorizontal: 18, paddingBottom: 36, gap: 14 },
+  modalCard: { borderRadius: 22, borderWidth: StyleSheet.hairlineWidth, padding: 18, gap: 12 },
+  sectionEyebrow: { fontSize: 12, fontWeight: '700', letterSpacing: 1.1 },
+  input: {
+    minHeight: 50,
+    fontSize: 16,
+    paddingHorizontal: 14,
+    borderRadius: 14,
+    borderWidth: StyleSheet.hairlineWidth,
+  },
+  skillGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 10,
+  },
+  skillTile: {
+    width: '48%',
+    flexGrow: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    padding: 12,
+    borderRadius: 16,
+    borderWidth: 1,
+  },
+  skillTileIcon: {
+    width: 36,
+    height: 36,
+    borderRadius: 11,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  skillTileLabel: {
+    fontSize: 14,
+    fontWeight: '700',
+    flex: 1,
+  },
   curtainRoot: { flex: 1, backgroundColor: '#000000' },
-  curtainCanvas: { flex: 1, backgroundColor: '#000000', justifyContent: 'flex-start', alignItems: 'center', paddingTop: 20 },
-  curtainLiftBtn: { paddingHorizontal: 14, paddingVertical: 10, borderRadius: 14, borderWidth: 1, borderColor: '#333333' },
-  curtainLiftText: { color: '#888888', fontSize: 13, fontWeight: '700' },
+  curtainCanvas: { flex: 1, backgroundColor: '#000000', justifyContent: 'flex-start', alignItems: 'center', paddingTop: 24 },
+  curtainLiftBtn: { paddingHorizontal: 16, paddingVertical: 10, borderRadius: 999, backgroundColor: '#121212' },
+  curtainLiftText: { color: '#9CA3AF', fontSize: 13, fontWeight: '700' },
 })

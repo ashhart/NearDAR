@@ -76,7 +76,7 @@ export function VisionModelCard({ manageMemory = false, onReady }: { manageMemor
 
   return <View style={[styles.card, { backgroundColor: colors.panel, borderColor: colors.divider }]}>
     <View style={styles.header}>
-      <View aria-hidden accessibilityElementsHidden importantForAccessibility="no-hide-descendants" style={[styles.icon, { backgroundColor: colors.raised }]}><Icon name="sparkles-outline" color={colors.accent} /></View>
+      <View aria-hidden accessibilityElementsHidden importantForAccessibility="no-hide-descendants" style={[styles.icon, { backgroundColor: colors.accentSoft }]}><Icon name="sparkles-outline" color={colors.accent} /></View>
       <View style={styles.details}>
         <Label>{title}</Label>
         {(state !== 'not-installed' || !vision?.available) && <Signal live={Platform.OS !== 'ios'} tone={state === 'ready' ? 'ready' : state === 'error' ? 'attention' : 'quiet'}>{status}</Signal>}
@@ -101,10 +101,10 @@ export function VisionModelCard({ manageMemory = false, onReady }: { manageMemor
 }
 
 const styles = StyleSheet.create({
-  card: { padding: 16, gap: 12, borderRadius: 21, borderWidth: 1 },
+  card: { padding: 18, gap: 12, borderRadius: 22, borderWidth: StyleSheet.hairlineWidth },
   header: { flexDirection: 'row', gap: 12, alignItems: 'center' },
-  icon: { width: 45, height: 45, borderRadius: 14, justifyContent: 'center', alignItems: 'center' },
+  icon: { width: 42, height: 42, borderRadius: 13, justifyContent: 'center', alignItems: 'center' },
   details: { flex: 1, gap: 3 },
-  progress: { height: 8, borderRadius: 4, overflow: 'hidden' },
-  fill: { height: '100%' },
+  progress: { height: 6, borderRadius: 3, overflow: 'hidden' },
+  fill: { height: '100%', borderRadius: 3 },
 })

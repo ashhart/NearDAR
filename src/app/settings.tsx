@@ -1,27 +1,45 @@
 import { useRef, useState } from 'react'
-import { Platform, StyleSheet, Switch, TextInput, View } from 'react-native'
+import { Platform, Pressable, StyleSheet, Switch, Text, TextInput, View } from 'react-native'
 import { router } from 'expo-router'
-import { Body, Button, Heading, Screen, StatusCard, TopBar, useColors } from '../components/ui'
+import {
+  Body,
+  Button,
+  Heading,
+  Icon,
+  Screen,
+  SegmentedControl,
+  StatusCard,
+  TopBar,
+  useColors,
+  type IconName,
+} from '../components/ui'
 import { VisionModelCard } from '../components/VisionModelCard'
 import { useAppSettings } from '../lib/SettingsContext'
 import { useSatnav } from '../lib/satnav/useSatnav'
 import { MOBILITY_PROFILES, MOBILITY_PROFILE_ORDER } from '../lib/satnav/profiles'
-import type { DirectionStyle, DistanceUnit, MountMode, SatnavMode, TalkGesture } from '../lib/guidance/types'
+import type { DirectionStyle, DistanceUnit, MobilityProfile, MountMode, SatnavMode, TalkGesture } from '../lib/guidance/types'
+
+const PROFILE_ICONS: Record<MobilityProfile, IconName> = {
+  standard: 'compass-outline',
+  cane: 'walk-outline',
+  'guide-dog': 'paw-outline',
+  'low-vision': 'eye-outline',
+}
 
 function Toggle({ label, caption, value, onChange }: { label: string; caption: string; value: boolean; onChange(value: boolean): void }) {
   const colors = useColors()
   return (
-    <View style={styles.toggle}>
+    <View style={[styles.toggle, { borderTopColor: colors.divider }]}>
       <View style={styles.toggleText}>
-        <Body>{label}</Body>
-        <Body muted>{caption}</Body>
+        <Text style={[styles.rowTitle, { color: colors.text }]}>{label}</Text>
+        <Text style={[styles.rowCaption, { color: colors.muted }]}>{caption}</Text>
       </View>
       <Switch
         accessibilityLabel={label}
         value={value}
         onValueChange={onChange}
-        trackColor={{ true: colors.accent, false: colors.border }}
-        thumbColor={colors.panel}
+        trackColor={{ true: colors.accent, false: colors.raised }}
+        thumbColor="#FFFFFF"
       />
     </View>
   )
@@ -87,10 +105,13 @@ function SpeakingSpeed({ value, onChange }: { value: number; onChange(value: num
       style={styles.slider}
     >
       <View pointerEvents="none" aria-hidden accessibilityElementsHidden importantForAccessibility="no-hide-descendants" style={styles.sliderContents}>
-        <View style={styles.sliderLabels}><Body>Speaking speed</Body><Body muted>{speed}×</Body></View>
-        <View style={[styles.sliderTrack, { backgroundColor: colors.border }]}>
+        <View style={styles.sliderLabels}>
+          <Text style={[styles.rowTitle, { color: colors.text }]}>Speaking speed</Text>
+          <Text style={[styles.speedBadge, { color: colors.accent }]}>{speed}×</Text>
+        </View>
+        <View style={[styles.sliderTrack, { backgroundColor: colors.raised }]}>
           <View style={[styles.sliderFill, { width: portion, backgroundColor: colors.accent }]} />
-          <View style={[styles.sliderThumb, { left: portion, backgroundColor: colors.accent }]} />
+          <View style={[styles.sliderThumb, { left: portion, backgroundColor: '#FFFFFF', borderColor: colors.accent }]} />
         </View>
       </View>
     </View>
@@ -117,192 +138,173 @@ export default function Settings() {
       </View>
 
       <StatusCard title="Mobility Profile">
-        <Body muted>{MOBILITY_PROFILES[settings.mobilityProfile].shortDescription}</Body>
-        <View style={styles.options}>
-          {MOBILITY_PROFILE_ORDER.map((profile) => (
-            <Button
-              key={profile}
-              compact
-              secondary={settings.mobilityProfile !== profile}
-              selected={settings.mobilityProfile === profile}
-              label={MOBILITY_PROFILES[profile].label}
-              onPress={() => void satnav.applyMobilityProfile(profile)}
-            />
-          ))}
+        <View style={styles.profileGrid}>
+          {MOBILITY_PROFILE_ORDER.map((profile) => {
+            const active = settings.mobilityProfile === profile
+            const meta = MOBILITY_PROFILES[profile]
+            return (
+              <Pressable
+                key={profile}
+                accessibilityRole="button"
+                accessibilityLabel={meta.label}
+                accessibilityState={{ selected: active }}
+                onPress={() => void satnav.applyMobilityProfile(profile)}
+                style={({ pressed }) => [
+                  styles.profileCard,
+                  {
+                    backgroundColor: active ? colors.accentSoft : colors.raised,
+                    borderColor: active ? colors.accent : 'transparent',
+                  },
+                  pressed && styles.pressed,
+                ]}
+              >
+                <View style={[styles.profileIconWrap, { backgroundColor: active ? colors.accent : colors.panel }]}>
+                  <Icon name={PROFILE_ICONS[profile]} size={18} color={active ? colors.ink : colors.accent} />
+                </View>
+                <Text numberOfLines={1} style={[styles.profileName, { color: colors.text }]}>
+                  {profile === 'guide-dog' ? 'Guide Dog' : meta.label}
+                </Text>
+              </Pressable>
+            )
+          })}
         </View>
+        <Text style={[styles.rowCaption, { color: colors.muted }]}>
+          {MOBILITY_PROFILES[settings.mobilityProfile].shortDescription}
+        </Text>
       </StatusCard>
 
-      <StatusCard title="Walking Mode & Talk Gesture">
-        <Body>Default guidance mode</Body>
-        <View style={styles.options}>
-          {([
-            ['satnav', 'Full Satnav'],
-            ['quiet', 'Quiet Haptics'],
+      <StatusCard title="Guidance & Display">
+        <Text style={[styles.fieldLabel, { color: colors.muted }]}>Default walking mode</Text>
+        <SegmentedControl<SatnavMode>
+          value={settings.guidanceMode}
+          options={[
+            ['satnav', 'Satnav'],
+            ['quiet', 'Quiet'],
             ['explore', 'Explore'],
-          ] as [SatnavMode, string][]).map(([mode, label]) => (
-            <Button
-              key={mode}
-              compact
-              secondary={settings.guidanceMode !== mode}
-              selected={settings.guidanceMode === mode}
-              label={label}
-              onPress={() => void update({ guidanceMode: mode })}
-            />
-          ))}
-        </View>
+          ]}
+          onChange={(guidanceMode) => void update({ guidanceMode })}
+        />
 
-        <Body>How to talk on the main screen</Body>
-        <View style={styles.options}>
-          {([
+        <Text style={[styles.fieldLabel, { color: colors.muted }]}>Talk gesture</Text>
+        <SegmentedControl<TalkGesture>
+          value={settings.talkGesture}
+          options={[
             ['tap', 'Tap anywhere'],
             ['hold', 'Press & hold'],
-          ] as [TalkGesture, string][]).map(([gesture, label]) => (
-            <Button
-              key={gesture}
-              compact
-              secondary={settings.talkGesture !== gesture}
-              selected={settings.talkGesture === gesture}
-              label={label}
-              onPress={() => void update({ talkGesture: gesture })}
-            />
-          ))}
-        </View>
-        <Body>Direction phrasing</Body>
-        <View style={styles.options}>
-          {([
-            ['natural', 'Natural (ahead left)'],
-            ['clock', 'Clock face (11 o’clock)'],
-          ] as [DirectionStyle, string][]).map(([directionStyle, label]) => (
-            <Button
-              key={directionStyle}
-              compact
-              secondary={settings.directionStyle !== directionStyle}
-              selected={settings.directionStyle === directionStyle}
-              label={label}
-              onPress={() => void update({ directionStyle })}
-            />
-          ))}
-        </View>
+          ]}
+          onChange={(talkGesture) => void update({ talkGesture })}
+        />
 
-        <Body>Distance units</Body>
-        <View style={styles.options}>
-          {([
+        <Text style={[styles.fieldLabel, { color: colors.muted }]}>Direction style</Text>
+        <SegmentedControl<DirectionStyle>
+          value={settings.directionStyle}
+          options={[
+            ['natural', 'Natural (left)'],
+            ['clock', 'Clock (11 o’clock)'],
+          ]}
+          onChange={(directionStyle) => void update({ directionStyle })}
+        />
+
+        <Text style={[styles.fieldLabel, { color: colors.muted }]}>Distance units</Text>
+        <SegmentedControl<DistanceUnit>
+          value={settings.distanceUnit}
+          options={[
             ['metric', 'Metres'],
             ['imperial', 'Feet & miles'],
-          ] as [DistanceUnit, string][]).map(([distanceUnit, label]) => (
-            <Button
-              key={distanceUnit}
-              compact
-              secondary={settings.distanceUnit !== distanceUnit}
-              selected={settings.distanceUnit === distanceUnit}
-              label={label}
-              onPress={() => void update({ distanceUnit })}
-            />
-          ))}
-        </View>
+          ]}
+          onChange={(distanceUnit) => void update({ distanceUnit })}
+        />
 
         <Toggle
           label="OLED True-Black high contrast"
-          caption="Pure black background with yellow and white contrast to eliminate glare for low-vision users."
+          caption="Pure black canvas with crisp yellow focus and maximum contrast."
           value={settings.oledHighContrast}
           onChange={(oledHighContrast) => void update({ oledHighContrast })}
         />
       </StatusCard>
 
       <StatusCard title="Hands-Free Carry & Pocket Satnav">
-        <Body>How you carry your phone</Body>
-        <View style={styles.options}>
-          {([
+        <Text style={[styles.fieldLabel, { color: colors.muted }]}>Phone carry orientation</Text>
+        <SegmentedControl<MountMode>
+          value={settings.mountMode}
+          options={[
             ['handheld', 'Handheld'],
             ['lanyard', 'Chest lanyard'],
-          ] as [MountMode, string][]).map(([mountMode, label]) => (
-            <Button
-              key={mountMode}
-              compact
-              secondary={settings.mountMode !== mountMode}
-              selected={settings.mountMode === mountMode}
-              label={label}
-              onPress={() => void update({ mountMode })}
-            />
-          ))}
-        </View>
+          ]}
+          onChange={(mountMode) => void update({ mountMode })}
+        />
         <Toggle
           label="Keep satnav running in pocket"
-          caption="Keeps GPS turns, 3D audio beacons, and AirPods/earbud buttons active while your screen is locked."
+          caption="Keeps GPS turns, 3D audio beacons, and AirPods buttons active while locked."
           value={settings.backgroundSatnav}
           onChange={(backgroundSatnav) => void update({ backgroundSatnav })}
         />
         <Toggle
-          label="Screen curtain (blackout screen)"
-          caption="Blacks out the display for privacy and battery savings while all touch gestures stay active."
+          label="Screen curtain"
+          caption="Black out display for privacy and battery while keeping all touch gestures live."
           value={settings.screenCurtain}
           onChange={(screenCurtain) => void update({ screenCurtain })}
         />
         <Toggle
-          label="Auto low-light torch assist"
-          caption="Gently enables the torch in very dark streets to help read signs and doors. LiDAR always works in darkness."
+          label="Auto low-light torch"
+          caption="Soft torch assist in dark streets for reading doors and signs. LiDAR works in 0 lux."
           value={settings.autoTorch}
           onChange={(autoTorch) => void update({ autoTorch })}
         />
-        <Body muted>
-          Earbud shortcuts: click once to talk, double-click (Next Track) to scan ahead, triple-click (Previous Track) to orient yourself.
-        </Body>
       </StatusCard>
 
       <StatusCard title="Haptics & 3D Spatial Audio">
         <Toggle
           label="Master haptics"
-          caption="Enable tactile steering, proximity radar, and hazard alerts."
+          caption="Tactile steering beats, proximity radar, and hazard alerts."
           value={settings.urgentHaptics}
           onChange={(urgentHaptics) => void update({ urgentHaptics })}
         />
         <Toggle
-          label="Compass & corridor steering beat"
-          caption="Gentle steady pulse while your phone points on-course or down an open corridor."
+          label="Compass & corridor lock pulse"
+          caption="Gentle steady pulse while aligned on-course or down a clear corridor."
           value={settings.hapticSteering}
           onChange={(hapticSteering) => void update({ hapticSteering })}
         />
         <Toggle
           label="Proximity obstacle radar"
-          caption="Parking-sensor style pulses that speed up as obstacles come closer than 2.2 metres."
+          caption="Parking-sensor cadence that speeds up closer than 2.2 metres."
           value={settings.hapticProximity}
           onChange={(hapticProximity) => void update({ hapticProximity })}
         />
         <Toggle
           label="3D headphone waypoint beacon"
-          caption="Binaural directional audio beacon in headphones so you hear turns and open space in 3D."
+          caption="Binaural directional audio beacon in open-ear or Transparency headphones."
           value={settings.spatialBeacon}
           onChange={(spatialBeacon) => void update({ spatialBeacon })}
         />
-        <Body muted>Preview tactile &amp; audio cues:</Body>
+        <Text style={[styles.fieldLabel, { color: colors.muted }]}>Preview cues</Text>
         <View style={styles.options}>
           <Button compact secondary label="On-course" onPress={() => void satnav.previewFeedback('compass-lock')} />
-          <Button compact secondary label="Proximity" onPress={() => void satnav.previewFeedback('proximity')} />
           <Button compact secondary label="Fast mover" onPress={() => void satnav.previewFeedback('fast-mover')} />
-          <Button compact secondary label="Dog / presence" onPress={() => void satnav.previewFeedback('animal')} />
+          <Button compact secondary label="Dog" onPress={() => void satnav.previewFeedback('animal')} />
           <Button compact secondary label="Turn right" onPress={() => void satnav.previewFeedback('turn-right')} />
           <Button compact secondary label="Head hazard" onPress={() => void satnav.previewFeedback('head-hazard')} />
           <Button compact secondary label="Drop-off" onPress={() => void satnav.previewFeedback('drop-off')} />
-          <Button compact secondary label="Arrived" onPress={() => void satnav.previewFeedback('arrived')} />
         </View>
       </StatusCard>
 
-      <StatusCard title="Voice & Speech">
+      <StatusCard title="Voice & TensorFold Narrator">
         <Toggle
-          label="Use phone speaker without headphones"
-          caption="Keep spoken guidance audible when headphones are disconnected."
+          label="Phone speaker without headphones"
+          caption="Keep spoken guidance audible when headphones disconnect."
           value={settings.speakerFallback}
           onChange={(speakerFallback) => void update({ speakerFallback })}
         />
         <Toggle
-          label="Name blocking obstacles automatically"
-          caption="Uses TensorFold Mobile to identify roadworks, pushbikes, bins, signs, and barriers blocking your path."
+          label="Identify blocking obstacles"
+          caption="Uses TensorFold Mobile to name roadworks, pushbikes, bins, and parked cars."
           value={settings.ambientObstacleNaming}
           onChange={(ambientObstacleNaming) => void update({ ambientObstacleNaming })}
         />
         <Toggle
           label="Proactive street & crossing narrator"
-          caption="Calls out crossings before turns and passing shops, entrances, or hazards while you walk."
+          caption="Calls out crossings before turns and passing shops or doorways while walking."
           value={settings.proactiveNarration}
           onChange={(proactiveNarration) => void update({ proactiveNarration })}
         />
@@ -312,7 +314,7 @@ export default function Settings() {
               compact
               secondary
               expanded={showVoices}
-              label={`Speaking voice: ${currentVoice?.name ?? 'System default'}`}
+              label={`Voice: ${currentVoice?.name ?? 'System default'}`}
               onPress={() => setShowVoices(!showVoices)}
             />
             {showVoices && (
@@ -344,58 +346,38 @@ export default function Settings() {
       </StatusCard>
 
       <StatusCard title="LiDAR Calibration">
-        <Body>Step length</Body>
-        <View style={styles.options}>
-          {[0.5, 0.65, 0.75, 0.9].map((stepLengthMeters) => (
-            <Button
-              key={stepLengthMeters}
-              compact
-              secondary={settings.stepLengthMeters !== stepLengthMeters}
-              selected={settings.stepLengthMeters === stepLengthMeters}
-              label={`${stepLengthMeters.toFixed(2)} m`}
-              onPress={() => void update({ stepLengthMeters })}
-            />
-          ))}
-        </View>
-        <Body>Obstacle warning distance</Body>
-        <View style={styles.options}>
-          {[1.5, 2.2, 3.0].map((warningDistanceMeters) => (
-            <Button
-              key={warningDistanceMeters}
-              compact
-              secondary={settings.warningDistanceMeters !== warningDistanceMeters}
-              selected={settings.warningDistanceMeters === warningDistanceMeters}
-              label={`${warningDistanceMeters.toFixed(1)} m`}
-              onPress={() => void update({ warningDistanceMeters })}
-            />
-          ))}
-        </View>
+        <Text style={[styles.fieldLabel, { color: colors.muted }]}>Calibrated step length</Text>
+        <SegmentedControl
+          value={settings.stepLengthMeters.toFixed(2)}
+          options={[
+            ['0.50', '0.50 m'],
+            ['0.65', '0.65 m'],
+            ['0.75', '0.75 m'],
+            ['0.90', '0.90 m'],
+          ]}
+          onChange={(v) => void update({ stepLengthMeters: Number(v) })}
+        />
+        <Text style={[styles.fieldLabel, { color: colors.muted }]}>Obstacle alert distance</Text>
+        <SegmentedControl
+          value={settings.warningDistanceMeters.toFixed(1)}
+          options={[
+            ['1.5', '1.5 m'],
+            ['2.2', '2.2 m'],
+            ['3.0', '3.0 m'],
+          ]}
+          onChange={(v) => void update({ warningDistanceMeters: Number(v) })}
+        />
       </StatusCard>
 
       <VisionModelCard manageMemory />
 
-      <StatusCard title="Saved Places & Offline Routes">
-        <Body muted>
-          {satnav.savedPlaces.length} saved places · {satnav.cachedRoutes.length} offline cached walking routes.
-        </Body>
-        {satnav.savedPlaces.map((place) => (
-          <View key={place.id} style={styles.placeRow}>
-            <Body>{place.name}</Body>
-            <Button compact secondary label="Remove" onPress={() => void satnav.deleteSavedPlace(place.id)} />
-          </View>
-        ))}
-        {satnav.cachedRoutes.length > 0 && (
-          <Button compact secondary label="Clear cached routes" onPress={() => void satnav.clearRouteCache()} />
-        )}
-      </StatusCard>
-
-      <StatusCard title="Trusted / Emergency Contact">
-        <Body muted>
-          Say “Share my location” or “Call my emergency contact” anytime to send your GPS pin and street address or dial for help.
-        </Body>
+      <StatusCard title="Trusted Contact">
+        <Text style={[styles.rowCaption, { color: colors.muted }]}>
+          Say “Share my location” or “Call my emergency contact” anytime.
+        </Text>
         <TextInput
           accessibilityLabel="Trusted contact name"
-          placeholder="Contact name (e.g. Alex)"
+          placeholder="Name (e.g. Alex)"
           placeholderTextColor={colors.muted}
           value={settings.emergencyContactName}
           onChangeText={(emergencyContactName) => void update({ emergencyContactName })}
@@ -404,19 +386,34 @@ export default function Settings() {
         <TextInput
           accessibilityLabel="Trusted contact phone number"
           keyboardType="phone-pad"
-          placeholder="Phone number (e.g. +44 7700 900123)"
+          placeholder="Phone number"
           placeholderTextColor={colors.muted}
           value={settings.emergencyContactPhone}
           onChangeText={(emergencyContactPhone) => void update({ emergencyContactPhone })}
           style={[styles.input, { color: colors.text, borderColor: colors.border, backgroundColor: colors.background }]}
         />
-        <Button compact secondary icon="share-social-outline" label="Test share my location" onPress={() => void satnav.shareLocationWithContact()} />
+        <Button compact secondary icon="share-social-outline" label="Test location share" onPress={() => void satnav.shareLocationWithContact()} />
       </StatusCard>
 
-      <StatusCard title="Privacy & Setup">
+      <StatusCard title="Saved Places & Offline Routes">
         <Body muted>
-          All camera frames, LiDAR depth maps, vision AI inference, speech recognition, haptics, and 3D beacons stay on your device. Online network access is used only when searching new addresses or fetching fresh walking routes.
+          {satnav.savedPlaces.length} saved places · {satnav.cachedRoutes.length} cached walking routes.
         </Body>
+        {satnav.savedPlaces.map((place) => (
+          <View key={place.id} style={styles.placeRow}>
+            <Text style={[styles.rowTitle, { color: colors.text }]}>{place.name}</Text>
+            <Button compact secondary label="Remove" onPress={() => void satnav.deleteSavedPlace(place.id)} />
+          </View>
+        ))}
+        {satnav.cachedRoutes.length > 0 && (
+          <Button compact secondary label="Clear cached routes" onPress={() => void satnav.clearRouteCache()} />
+        )}
+      </StatusCard>
+
+      <StatusCard title="Privacy & Onboarding">
+        <Text style={[styles.rowCaption, { color: colors.muted }]}>
+          Camera frames, LiDAR depth, TensorFold Metal AI, speech, haptics, and 3D beacons stay 100% on your device.
+        </Text>
         <Button compact secondary label="Repeat onboarding" onPress={() => void update({ onboardingComplete: false }).then(() => router.replace('/setup'))} />
       </StatusCard>
     </Screen>
@@ -424,16 +421,47 @@ export default function Settings() {
 }
 
 const styles = StyleSheet.create({
-  title: { gap: 8 },
-  toggle: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 14 },
-  toggleText: { flex: 1, gap: 3 },
+  title: { paddingTop: 2, paddingBottom: 2 },
+  profileGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
+  profileCard: {
+    width: '48%',
+    flexGrow: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    padding: 12,
+    borderRadius: 16,
+    borderWidth: 1.5,
+  },
+  profileIconWrap: {
+    width: 34,
+    height: 34,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  profileName: { fontSize: 14, fontWeight: '700', flex: 1 },
+  fieldLabel: { fontSize: 13, fontWeight: '600', marginTop: 4 },
+  rowTitle: { fontSize: 15, fontWeight: '600' },
+  rowCaption: { fontSize: 13, lineHeight: 19 },
+  toggle: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 14,
+    paddingTop: 12,
+    borderTopWidth: StyleSheet.hairlineWidth,
+  },
+  toggleText: { flex: 1, gap: 2 },
   options: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   placeRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10 },
-  input: { minHeight: 54, fontSize: 18, padding: 12, borderRadius: 12, borderWidth: 1.5 },
-  slider: { minHeight: 56, paddingBottom: 12 },
+  input: { minHeight: 48, fontSize: 16, paddingHorizontal: 14, borderRadius: 14, borderWidth: StyleSheet.hairlineWidth },
+  slider: { minHeight: 54, paddingTop: 8, paddingBottom: 8 },
   sliderContents: { gap: 12 },
   sliderLabels: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 8 },
+  speedBadge: { fontSize: 14, fontWeight: '800', fontVariant: ['tabular-nums'] },
   sliderTrack: { marginHorizontal: 9, height: 6, borderRadius: 3 },
   sliderFill: { height: 6, borderRadius: 3 },
-  sliderThumb: { position: 'absolute', top: -6, marginLeft: -9, width: 18, height: 18, borderRadius: 9 },
+  sliderThumb: { position: 'absolute', top: -7, marginLeft: -10, width: 20, height: 20, borderRadius: 10, borderWidth: 2 },
+  pressed: { opacity: 0.78, transform: [{ scale: 0.985 }] },
 })

@@ -6,7 +6,42 @@
 
 NearDar turns an iPhone with LiDAR into a live walking companion you can follow by touch and sound and talk to naturally—without looking at the screen. It combines **turn-by-turn outdoor walking directions**, **continuous local LiDAR obstacle and velocity sensing**, **CoreHaptics steering and proximity radar**, **3D binaural headphone beacons**, and **local TensorFold Mobile (`LFM3-VL-2B` on Apple Metal)** vision and conversation, all running on your device.
 
-[Features](#features) · [Eyes-free gestures & voice commands](#eyes-free-gestures--voice-commands) · [Architecture](#architecture) · [Build NearDar](#build-neardar)
+[Screenshots](#screenshots) · [Features](#features) · [Eyes-free gestures & voice commands](#eyes-free-gestures--voice-commands) · [Architecture](#architecture) · [Build NearDar](#build-neardar)
+
+---
+
+## Screenshots
+
+<table>
+  <tr>
+    <td align="center" valign="top" width="25%">
+      <img src="docs/images/satnav-live.png" width="210" alt="NearDar live walking satnav screen in Obsidian Dark mode showing LiDAR, Satnav, and 3D badges, a route banner to High St Pharmacy in 85 metres, a curved 7-sector sonar clearance arc recommending to bear slightly right, Dog 1.9m, Person 3.1m, and Opening ahead right pills, roadworks guidance text, and a bottom Talk dock." />
+      <br />
+      <strong>Live LiDAR Satnav</strong><br />
+      <sub>Curved 7-sector sonar arc, micro-detour steering, and live animal/opening badges</sub>
+    </td>
+    <td align="center" valign="top" width="25%">
+      <img src="docs/images/satnav-oled-hazard.png" width="210" alt="NearDar OLED True-Black high-contrast alert screen showing Crossing Assistant, a red Hold Still warning for a fast mover approaching at 2.8 metres at 11 o'clock in low light, and a high-contrast yellow Talk button." />
+      <br />
+      <strong>OLED True-Black Alert</strong><br />
+      <sub>Fast-mover hold-still alert, Crossing Assistant, and 0-lux Night LiDAR badge</sub>
+    </td>
+    <td align="center" valign="top" width="25%">
+      <img src="docs/images/street-assistants.png" width="210" alt="NearDar Explore and Navigate sheet showing a walking destination input, a two-column Street Assistants grid with Find Door, Crossing, Transit, Vivid View, Torch, and Share Pin, plus Orient me, Trace path back offline, and Saved Places." />
+      <br />
+      <strong>Street Assistants</strong><br />
+      <sub>One-tap Find Door, Crossing, Transit, Vivid View, Torch, Share Pin &amp; offline return</sub>
+    </td>
+    <td align="center" valign="top" width="25%">
+      <img src="docs/images/settings-profiles.png" width="210" alt="NearDar Settings screen showing the 2x2 Mobility Profile icon grid with White Cane selected, plus segmented controls for walking mode, talk gesture, direction style, and distance units." />
+      <br />
+      <strong>Mobility Profiles</strong><br />
+      <sub>Balanced, White Cane, Guide Dog &amp; Low Vision presets plus clock-face &amp; unit controls</sub>
+    </td>
+  </tr>
+</table>
+
+<sub>Mobile UI previews captured at 390×844 using simulated LiDAR depth and walking-route telemetry.</sub>
 
 ---
 
