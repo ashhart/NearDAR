@@ -71,6 +71,9 @@ public final class TensorFoldPerceptionModule: Module {
     }
 
     AsyncFunction("releaseCapture") { (uri: String) in controller.release(uri) }
+    AsyncFunction("setTorch") { (enabled: Bool, level: Double?) in
+      controller.setTorch(enabled: enabled, level: level ?? 0.6)
+    }
     AsyncFunction("alignToSeat") { (id: String, observedAt: Double, promise: Promise) in
       controller.alignToSeat(id: id, observedAt: observedAt) { result in promise.resolve(result) }
     }

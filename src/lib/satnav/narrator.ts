@@ -3,7 +3,17 @@ import type { DirectionStyle, SatnavMode, SceneSnapshot, SceneWarning } from '..
 import { formatWalkingDistance, haversineMeters, normalizeAngleOffset } from '../navigation/geo'
 import type { RouteProgress } from '../navigation/tracker'
 import { formatDirectionLabel } from './arbitrator'
-import { buildAmbientObstaclePrompt, parseAmbientObstacleLabel, sanitizeSpokenVisionOutput } from './prompts'
+import {
+  buildAmbientObstaclePrompt,
+  DARK_LIGHTING_TELEMETRY_NOTE,
+  parseAmbientObstacleLabel,
+  resolveLightingState,
+  sanitizeSpokenVisionOutput,
+  type LightingState,
+  type MobilityProfile,
+} from './prompts'
+
+export type { LightingState, MobilityProfile }
 
 export type NarrationTaskKind = 'hazard-classify' | 'crossing-lookahead' | 'street-explore'
 
@@ -36,6 +46,26 @@ export interface NarrationPlannerInput {
   stepLengthMeters?: number
   lastCriticalAt: number
   now: number
+  lightingState?: LightingState
+  proactiveVlmAllowed?: boolean
+  mobilityProfile?: MobilityProfile
+}
+
+export type HazardClassificationInput = Pick<
+  NarrationPlannerInput,
+  'ambientObstacleNaming' | 'engineReady' | 'busy' | 'listening' | 'standby' | 'now'
+> & {
+  lightingState?: LightingState
+  proactiveVlmAllowed?: boolean
+  mobilityProfile?: MobilityProfile
+  corridorState?: 'clear' | 'narrow' | 'blocked' | 'unknown'
+  snapshot?: SceneSnapshot
+}
+
+function isProactiveVlmAllowed(explicit?: boolean, snapshot?: SceneSnapshot): boolean {
+  if (explicit !== undefined) return explicit
+  const fromSnap = (snapshot as { proactiveVlmAllowed?: boolean } | undefined)?.proactiveVlmAllowed
+  return fromSnap !== false
 }
 
 const CROSSING_SYSTEM =
@@ -74,13 +104,29 @@ export class StreetNarrator {
   /** Triggered reactively when an unnamed LiDAR obstacle is blocking or narrowing the path. */
   planHazardClassification(
     warning: SceneWarning,
-    input: Pick<NarrationPlannerInput, 'ambientObstacleNaming' | 'engineReady' | 'busy' | 'listening' | 'standby' | 'now'>,
+    input: HazardClassificationInput,
   ): NarrationTask | undefined {
     if (!input.ambientObstacleNaming || !input.engineReady || input.busy || input.listening || input.standby) {
       return undefined
     }
+    if (!isProactiveVlmAllowed(input.proactiveVlmAllowed, input.snapshot)) {
+      return undefined
+    }
+    const lighting = resolveLightingState(input.lightingState, input.snapshot)
+    if (lighting === 'dark') {
+      return undefined
+    }
     if (warning.kind !== 'obstacle' || warning.label) return undefined
     if (warning.distanceMeters !== undefined && warning.distanceMeters > 2.6) return undefined
+
+    // Guide dogs smoothly route around routine static obstacles; only classify when the path is genuinely blocked.
+    if (input.mobilityProfile === 'guide-dog') {
+      const corridorState = input.corridorState ?? input.snapshot?.corridor?.corridorState
+      if (corridorState !== 'blocked') {
+        return undefined
+      }
+    }
+
     if (input.now - this.lastHazardAt < 7_500) return undefined
 
     this.lastHazardAt = input.now
@@ -101,9 +147,12 @@ export class StreetNarrator {
   planProactive(input: NarrationPlannerInput): NarrationTask | undefined {
     if (!input.engineReady || input.busy || input.listening || input.standby) return undefined
     if (input.mode === 'quiet') return undefined
+    if (!isProactiveVlmAllowed(input.proactiveVlmAllowed, input.snapshot)) return undefined
     if (!input.snapshot?.trackingReady || input.snapshot.aimState !== 'level') return undefined
     // Never launch ambient narration right after an urgent hazard
     if (input.now - input.lastCriticalAt < 5_000) return undefined
+
+    const lighting = resolveLightingState(input.lightingState, input.snapshot)
 
     // 1. Turn / Crossing lookahead when approaching a route maneuver (3m..16m away)
     if (
@@ -121,12 +170,13 @@ export class StreetNarrator {
       const turnHint = input.route.nextStep.instruction
       const dist = formatWalkingDistance(input.route.distanceToNextTurnMeters, input.stepLengthMeters)
       const dirHint = input.directionStyle === 'clock' ? ' Use clock-face directions.' : ''
+      const darkNote = lighting === 'dark' ? ` ${DARK_LIGHTING_TELEMETRY_NOTE}` : ''
       return {
         kind: 'crossing-lookahead',
         system: CROSSING_SYSTEM,
         prompt:
           `Upcoming navigation step in ${dist}: "${turnHint}". ` +
-          `Describe the kerb, crossing, roadworks, cyclists, or doorway ahead in one short sentence.${dirHint}`,
+          `Describe the kerb, crossing, roadworks, cyclists, or doorway ahead in one short sentence.${dirHint}${darkNote}`,
         maxImageTokens: 128,
         maxTokens: 48,
         temperature: 0.1,
@@ -137,6 +187,8 @@ export class StreetNarrator {
 
     // 2. Passing street-scene & landmark narration (only when user has moved or turned!)
     if (!input.proactiveNarration) return undefined
+    // Pause non-essential visual street exploration when camera view is dark; LiDAR depth remains active.
+    if (lighting === 'dark') return undefined
     const minIntervalMs = input.mode === 'explore' ? 16_000 : 28_000
     if (input.now - this.lastExploreAt < minIntervalMs) return undefined
 
@@ -161,12 +213,16 @@ export class StreetNarrator {
     const ocr = (input.snapshot.recognizedText ?? []).filter(Boolean).slice(0, 4)
     const ocrNote = ocr.length > 0 ? ` Visible signs: "${ocr.join(', ').slice(0, 120)}".` : ''
     const dirHint = input.directionStyle === 'clock' ? ' Use clock-face directions.' : ''
+    const dimNote = lighting === 'dim' ? ' Lighting is dim; report only clearly visible features.' : ''
+    const focusLine =
+      input.mobilityProfile === 'guide-dog'
+        ? 'Prioritize crossings, doorways, shopfront signs, bus stops, or transit entrances ahead rather than routine static obstacles.'
+        : 'Name the single most helpful landmark, shopfront, entrance, cyclist, animal, or street hazard visible ahead.'
 
     return {
       kind: 'street-explore',
       system: EXPLORE_SYSTEM,
-      prompt:
-        `Name the single most helpful landmark, shopfront, entrance, cyclist, animal, or street hazard visible ahead.${ocrNote}${dirHint}`,
+      prompt: `${focusLine}${ocrNote}${dirHint}${dimNote}`,
       maxImageTokens: 128,
       maxTokens: 44,
       temperature: 0.15,

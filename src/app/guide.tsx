@@ -21,6 +21,7 @@ import { RadarHud } from '../components/RadarHud'
 import { useSatnav } from '../lib/satnav/useSatnav'
 import { useAppSettings } from '../lib/SettingsContext'
 import { formatWalkingDistance } from '../lib/navigation/geo'
+import { MOBILITY_SKILLS } from '../lib/satnav/modes'
 import type { SatnavMode } from '../lib/guidance/types'
 
 function CameraPreview(props: ViewProps) {
@@ -173,10 +174,51 @@ export default function SatnavGuide() {
 
   const canvasAccessibilityLabel = [
     satnav.active ? `${MODE_LABELS[satnav.mode]} active.` : 'Satnav paused.',
-    routeActive && route ? `Route to ${route.route.destinationName}, ${formatWalkingDistance(route.remainingDistanceMeters, settings.stepLengthMeters)} left. ${route.currentStep.instruction}.` : '',
+    routeActive && route ? `Route to ${route.route.destinationName}, ${formatWalkingDistance(route.remainingDistanceMeters, settings.stepLengthMeters, settings.distanceUnit)} left. ${route.currentStep.instruction}.` : '',
+    satnav.activeSkill !== 'none' ? `${MOBILITY_SKILLS[satnav.activeSkill].label} active.` : '',
     satnav.fused.summary,
     satnav.lastReply?.text ? `Last message: ${satnav.lastReply.text}` : '',
   ].filter(Boolean).join(' ')
+
+  if (settings.screenCurtain) {
+    return (
+      <SafeAreaView style={styles.curtainRoot}>
+        <View
+          {...panResponder.panHandlers}
+          accessible
+          accessibilityRole="button"
+          accessibilityLabel={`Screen curtain active. ${canvasAccessibilityLabel}`}
+          accessibilityHint="Tap to talk. Swipe up to scan ahead. Swipe down to orient yourself. Double-tap to pause or resume. Say turn screen back on to lift curtain."
+          accessibilityActions={[
+            { name: 'activate', label: 'Talk to NearDar' },
+            { name: 'scanAhead', label: 'Scan ahead now' },
+            { name: 'orientMe', label: 'Orient me' },
+            { name: 'liftCurtain', label: 'Turn screen back on' },
+            { name: 'magicTap', label: satnav.active ? 'Pause satnav' : 'Resume satnav' },
+          ]}
+          onAccessibilityAction={({ nativeEvent }) => {
+            switch (nativeEvent.actionName) {
+              case 'activate': void satnav.beginTalk(); break
+              case 'scanAhead': void satnav.quickScanAhead(); break
+              case 'orientMe': void satnav.orientMe(true); break
+              case 'liftCurtain': void satnav.toggleScreenCurtain(false); break
+              case 'magicTap': void satnav.togglePause(); break
+            }
+          }}
+          style={styles.curtainCanvas}
+        >
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Turn screen back on"
+            onPress={() => void satnav.toggleScreenCurtain(false)}
+            style={styles.curtainLiftBtn}
+          >
+            <Text style={styles.curtainLiftText}>Screen Curtain On · Tap to Show Screen</Text>
+          </Pressable>
+        </View>
+      </SafeAreaView>
+    )
+  }
 
   return (
     <SafeAreaView style={[styles.safe, { backgroundColor: colors.background }]}>
@@ -215,7 +257,7 @@ export default function SatnavGuide() {
                   {route.route.destinationName}
                 </Text>
                 <Text style={[styles.routeDist, { color: colors.accent }]}>
-                  {formatWalkingDistance(route.remainingDistanceMeters, settings.stepLengthMeters)} left
+                  {formatWalkingDistance(route.remainingDistanceMeters, settings.stepLengthMeters, settings.distanceUnit)} left
                   {route.route.source !== 'mapkit' ? ' · Offline' : ''}
                 </Text>
               </View>
@@ -224,6 +266,26 @@ export default function SatnavGuide() {
             <Text style={[styles.routeStep, { color: colors.text }]}>
               {route.offRoute ? 'Off route — follow the beacon to rejoin.' : route.currentStep.instruction}
             </Text>
+          </View>
+        )}
+
+        {/* Active Mobility Skill Bar (Door Finder, Crossing, Bus Watcher, Vivid Scene) */}
+        {satnav.activeSkill !== 'none' && (
+          <View style={[styles.skillBar, { backgroundColor: colors.raised, borderColor: colors.accent }]}>
+            <Text numberOfLines={1} style={[styles.skillLabel, { color: colors.text }]}>
+              {satnav.activeSkill === 'transit' && satnav.watchedBus
+                ? `Watching for Bus ${satnav.watchedBus}`
+                : MOBILITY_SKILLS[satnav.activeSkill].label}
+            </Text>
+            <View style={styles.skillActions}>
+              <Button
+                compact
+                secondary
+                label="Re-scan"
+                onPress={() => void satnav.runSkill(satnav.activeSkill === 'none' ? 'door-finder' : satnav.activeSkill, satnav.watchedBus)}
+              />
+              <Button compact secondary label="Done" onPress={satnav.clearSkill} />
+            </View>
           </View>
         )}
 
@@ -271,6 +333,7 @@ export default function SatnavGuide() {
             snapshot={satnav.snapshot}
             fused={satnav.fused}
             headingDegrees={satnav.headingDegrees}
+            distanceUnit={settings.distanceUnit}
             active={satnav.active}
           />
 
@@ -410,6 +473,71 @@ export default function SatnavGuide() {
               <Button icon="navigate-outline" label="Start Walking Route" disabled={!destinationInput.trim()} onPress={handleSubmitDestination} />
             </View>
 
+            {/* Quick Street Assistants & Everyday Companion Skills */}
+            <View style={[styles.modalCard, { backgroundColor: colors.panel, borderColor: colors.divider }]}>
+              <Label>Street Assistants</Label>
+              <Body muted>One tap or say “find the door”, “help me cross”, “watch for bus 73”, or “describe the view”.</Body>
+              <View style={styles.skillGrid}>
+                <Button
+                  compact
+                  secondary
+                  icon="enter-outline"
+                  label="Find the door"
+                  onPress={() => {
+                    setNavSheetOpen(false)
+                    void satnav.runSkill('door-finder', route?.route.destinationName)
+                  }}
+                />
+                <Button
+                  compact
+                  secondary
+                  icon="walk-outline"
+                  label="Crossing assistant"
+                  onPress={() => {
+                    setNavSheetOpen(false)
+                    void satnav.runSkill('crossing')
+                  }}
+                />
+                <Button
+                  compact
+                  secondary
+                  icon="bus-outline"
+                  label="Transit / Bus"
+                  onPress={() => {
+                    setNavSheetOpen(false)
+                    void satnav.runSkill('transit')
+                  }}
+                />
+                <Button
+                  compact
+                  secondary
+                  icon="color-palette-outline"
+                  label="Describe view"
+                  onPress={() => {
+                    setNavSheetOpen(false)
+                    void satnav.runSkill('vivid')
+                  }}
+                />
+                <Button
+                  compact
+                  secondary
+                  icon="flashlight-outline"
+                  label={satnav.torchEnabled ? 'Torch off' : 'Torch on'}
+                  onPress={() => void satnav.toggleTorch()}
+                />
+                <Button
+                  compact
+                  secondary
+                  icon="share-social-outline"
+                  label="Share location"
+                  onPress={() => {
+                    setNavSheetOpen(false)
+                    void satnav.shareLocationWithContact()
+                  }}
+                />
+              </View>
+            </View>
+
             {/* Quick Orientation & Offline Return */}
             <View style={[styles.modalCard, { backgroundColor: colors.panel, borderColor: colors.divider }]}>
               <Label>Get Your Bearings</Label>
@@ -516,4 +644,12 @@ const styles = StyleSheet.create({
   modalBody: { paddingHorizontal: 20, paddingBottom: 32, gap: 16 },
   modalCard: { borderRadius: 20, borderWidth: 1, padding: 16, gap: 12 },
   input: { minHeight: 54, fontSize: 18, paddingHorizontal: 14, borderRadius: 14, borderWidth: 1.5 },
+  skillBar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10, paddingHorizontal: 14, paddingVertical: 10, borderRadius: 16, borderWidth: 1.5 },
+  skillLabel: { fontSize: 16, fontWeight: '800', flex: 1 },
+  skillActions: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  skillGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  curtainRoot: { flex: 1, backgroundColor: '#000000' },
+  curtainCanvas: { flex: 1, backgroundColor: '#000000', justifyContent: 'flex-start', alignItems: 'center', paddingTop: 20 },
+  curtainLiftBtn: { paddingHorizontal: 14, paddingVertical: 10, borderRadius: 14, borderWidth: 1, borderColor: '#333333' },
+  curtainLiftText: { color: '#888888', fontSize: 13, fontWeight: '700' },
 })

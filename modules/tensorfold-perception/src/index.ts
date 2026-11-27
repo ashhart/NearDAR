@@ -1,6 +1,10 @@
 import { type EventSubscription, requireOptionalNativeModule } from 'expo-modules-core';
 
 export type DepthState = 'unavailable' | 'starting' | 'ready' | 'stale' | 'limited' | 'lost';
+export type DepthSource = 'lidar' | 'feature-points' | 'unavailable';
+export type MountMode = 'handheld' | 'lanyard';
+export type ThermalState = 'nominal' | 'fair' | 'serious' | 'critical';
+export type LightingState = 'good' | 'dim' | 'dark';
 export type Direction = 'ahead' | 'ahead-left' | 'ahead-right' | 'left' | 'right' | 'behind' | 'unknown';
 export type CorridorState = 'clear' | 'narrow' | 'blocked' | 'unknown';
 export type AimState = 'level' | 'too-low' | 'too-high' | 'lowered' | 'covered';
@@ -64,6 +68,7 @@ export interface SessionOptions {
   detectPeople?: boolean;
   recognizeText?: boolean;
   ocrLanguages?: string[];
+  mountMode?: MountMode;
   /** Shared guidance fields consumed by voice and UI modules. */
   speechRate?: number;
   urgentHaptics?: boolean;
@@ -164,6 +169,11 @@ export interface SceneSnapshot {
   headingDegrees?: number;
   aimState?: AimState;
   pitchDegrees?: number;
+  depthSource?: DepthSource;
+  thermalState?: ThermalState;
+  proactiveVlmAllowed?: boolean;
+  lightingState?: LightingState;
+  ambientLuma?: number;
   notes: string[];
 }
 
@@ -183,6 +193,7 @@ type NativePerception = {
   stopSession(): Promise<void>;
   captureScene(options?: CaptureOptions): Promise<SceneSnapshot>;
   releaseCapture(uri: string): Promise<{ released: boolean }>;
+  setTorch?(enabled: boolean, level?: number): Promise<{ active: boolean }>;
   alignToSeat?(id: string, observedAt: number): Promise<SeatAlignmentResult>;
   cancelSeatAlignment?(): Promise<void>;
   addListener(eventName: string, listener: (event: PerceptionEvent) => void): void;
@@ -198,6 +209,7 @@ const unavailable: NativePerception = {
   stopSession: async () => { throw new Error(unavailableMessage); },
   captureScene: async () => { throw new Error(unavailableMessage); },
   releaseCapture: async () => ({ released: false }),
+  setTorch: async () => ({ active: false }),
   addListener: () => {},
   removeListener: () => {},
 }
@@ -233,6 +245,11 @@ export function releaseCapture(uri: string): Promise<{ released: boolean }> {
   return native.releaseCapture(uri);
 }
 
+export function setTorch(enabled: boolean, level = 0.6): Promise<{ active: boolean }> {
+  const clamped = Number.isFinite(level) ? Math.min(1, Math.max(0.05, level)) : 0.6;
+  return native.setTorch?.(enabled, clamped) ?? Promise.resolve({ active: false });
+}
+
 export function alignToSeat(id: string, observedAt: number): Promise<SeatAlignmentResult> {
   return native.alignToSeat?.(id, observedAt) ?? Promise.resolve('unavailable');
 }
@@ -262,6 +279,9 @@ function validateOptions(options: SessionOptions) {
     options.criticalDistanceMeters >= options.warningDistanceMeters
   ) {
     throw new Error('criticalDistanceMeters must be less than warningDistanceMeters.');
+  }
+  if (options.mountMode !== undefined && options.mountMode !== 'handheld' && options.mountMode !== 'lanyard') {
+    throw new Error("mountMode must be 'handheld' or 'lanyard'.");
   }
 }
 

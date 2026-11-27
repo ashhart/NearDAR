@@ -2,14 +2,27 @@ import AVFAudio
 import Foundation
 
 enum VoiceAudio {
+  static var remoteControlsActive = false
+
+  static var supportsBackgroundAudio: Bool {
+    guard let modes = Bundle.main.object(forInfoDictionaryKey: "UIBackgroundModes") as? [String] else {
+      return false
+    }
+    return modes.contains("audio")
+  }
+
   static func activate(operation: String, recognition: Bool, preferBluetoothMicrophone: Bool, speakerFallback: Bool = true) throws {
     let session = AVAudioSession.sharedInstance()
     var step = "configuring audio"
     do {
       if recognition {
-        try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.allowBluetoothHFP, .defaultToSpeaker, .duckOthers])
+        let options: AVAudioSession.CategoryOptions = remoteControlsActive
+          ? [.allowBluetoothHFP, .defaultToSpeaker]
+          : [.allowBluetoothHFP, .defaultToSpeaker, .duckOthers]
+        try session.setCategory(.playAndRecord, mode: .voiceChat, options: options)
       } else {
-        try session.setCategory(.playback, mode: .spokenAudio, options: [.duckOthers])
+        let options: AVAudioSession.CategoryOptions = remoteControlsActive ? [] : [.duckOthers]
+        try session.setCategory(.playback, mode: .spokenAudio, options: options)
       }
       step = "activating audio"
       try session.setActive(true)
@@ -19,15 +32,31 @@ enum VoiceAudio {
         if input?.uid != session.preferredInput?.uid { try session.setPreferredInput(input) }
       }
     } catch {
-      deactivate()
+      if !remoteControlsActive {
+        deactivate()
+      }
       let systemError = error as NSError
       throw VoiceFailure(operation: operation, code: "E_AUDIO_SESSION",
         message: "Error while \(step) (\(systemError.domain), \(systemError.code)).")
     }
     if !recognition && !speakerFallback && currentRouteKind() == "speaker" {
-      deactivate()
+      if !remoteControlsActive {
+        deactivate()
+      }
       throw VoiceFailure(operation: operation, code: "E_AUDIO_ROUTE",
         message: "Connect headphones to hear NearDar, or enable the phone speaker in Settings.")
+    }
+  }
+
+  static func ensurePlaybackSessionForRemoteControls() {
+    let session = AVAudioSession.sharedInstance()
+    do {
+      if session.category != .playback || session.mode != .spokenAudio || !session.categoryOptions.isEmpty {
+        try session.setCategory(.playback, mode: .spokenAudio, options: [])
+      }
+      try session.setActive(true)
+    } catch {
+      // Best-effort keep-alive for Lock Screen and earbud media-button triggers.
     }
   }
 

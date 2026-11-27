@@ -5,20 +5,29 @@ import android.app.Activity
 import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.ImageFormat
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
 import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraDevice
 import android.hardware.camera2.CameraManager
+import android.hardware.camera2.CaptureRequest
 import android.media.Image
 import android.media.ImageReader
+import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
+import android.os.PowerManager
 import androidx.core.content.ContextCompat
 import com.google.android.gms.tasks.Tasks
 import com.google.ar.core.ArCoreApk
 import com.google.ar.core.Config
 import com.google.ar.core.Frame
+import com.google.ar.core.Plane
+import com.google.ar.core.PointCloud
 import com.google.ar.core.Session
 import com.google.ar.core.TrackingState
 import com.google.ar.core.exceptions.CameraNotAvailableException
@@ -29,7 +38,11 @@ import com.google.mlkit.vision.text.TextRecognizer
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import java.util.UUID
 import kotlin.math.abs
+import kotlin.math.asin
+import kotlin.math.atan2
+import kotlin.math.hypot
 import kotlin.math.max
+import kotlin.math.roundToInt
 
 class ArcorePerceptionController(
   private val context: Context,
@@ -40,6 +53,9 @@ class ArcorePerceptionController(
   private val handler = Handler(thread.looper)
   private val mainHandler = Handler(Looper.getMainLooper())
   private val analyzer = DepthAnalyzer()
+  private val approachTracker = ApproachTracker()
+  private val poseMatrix = FloatArray(16)
+  private val rotationMatrix = FloatArray(9)
   private var session: Session? = null
   private var settings = SessionSettings.parse(null)
   private var active = false
@@ -59,6 +75,39 @@ class ArcorePerceptionController(
   private var cameraOnlyReason: String? = null
   private var cameraStartCompletion: ((Result<Map<String, Any?>>) -> Unit)? = null
   private var lastErrorAt = 0L
+  private var detectedFloorY: Float? = null
+  private var sensorManager: SensorManager? = null
+  private var sensorHeadingDegrees: Double? = null
+  private var sensorPitchDegrees: Double? = null
+  private var latestLightAnalysis: LightAnalysis? = null
+  private var lastLumaSampleMs = 0L
+  private var torchActive = false
+
+  private val sensorListener = object : SensorEventListener {
+    override fun onSensorChanged(event: SensorEvent) {
+      val values = event.values ?: return
+      if (values.size < 3) return
+      try {
+        SensorManager.getRotationMatrixFromVector(rotationMatrix, values)
+        // Back camera looks along device -Z -> column 2 negated in world ENU (East, North, Up)
+        val east = -rotationMatrix[2].toDouble()
+        val north = -rotationMatrix[5].toDouble()
+        val up = -rotationMatrix[8].toDouble()
+        val pitch = asin(up.coerceIn(-1.0, 1.0)) * 180.0 / Math.PI
+        if (pitch.isFinite()) sensorPitchDegrees = pitch
+        val horiz = hypot(east, north)
+        if (horiz >= 0.25) {
+          var degrees = atan2(east, north) * 180.0 / Math.PI
+          if (degrees < 0.0) degrees += 360.0
+          if (degrees.isFinite()) sensorHeadingDegrees = degrees
+        }
+      } catch (_: Exception) {
+        // Ignore malformed sensor frames
+      }
+    }
+
+    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+  }
 
   fun capabilities(): Map<String, Any?> {
     val availability = ArCoreApk.getInstance().checkAvailability(context)
@@ -108,7 +157,7 @@ class ArcorePerceptionController(
   }
 
   fun start(options: Map<String, Any?>?, completion: (Result<Map<String, Any?>>) -> Unit) {
-    settings = try { SessionSettings.parse(options) } catch (error: Exception) {
+    val parsedSettings = try { SessionSettings.parse(options) } catch (error: Exception) {
       completion(Result.failure(error)); return
     }
     if (activityProvider() == null) {
@@ -117,6 +166,7 @@ class ArcorePerceptionController(
     val availability = ArCoreApk.getInstance().checkAvailability(context)
     handler.post {
       stopInternal()
+      settings = parsedSettings
       if (availability != ArCoreApk.Availability.SUPPORTED_INSTALLED) {
         startCameraOnly("ARCore is unavailable on this device (${availability.name}); using camera-only mode.", completion)
         return@post
@@ -136,6 +186,11 @@ class ArcorePerceptionController(
         session = created
         active = true
         latestSnapshot = null
+        detectedFloorY = null
+        latestLightAnalysis = null
+        lastLumaSampleMs = 0L
+        approachTracker.reset()
+        startOrientationSensor()
         val result = mutableMapOf<String, Any?>("active" to true, "capabilities" to capabilities())
         settings.stepLength?.let { result["stepLengthMeters"] = it }
         completion(Result.success(result))
@@ -165,8 +220,23 @@ class ArcorePerceptionController(
     }
   }
 
+  fun setTorch(enabled: Boolean, level: Double, completion: (Map<String, Any?>) -> Unit) {
+    val clamped = if (level.isFinite()) level.coerceIn(0.05, 1.0) else 0.6
+    handler.post {
+      val activeState = setTorchInternal(enabled, clamped)
+      completion(mapOf("active" to activeState))
+    }
+  }
+
   private fun stopInternal() {
     handler.removeCallbacksAndMessages(null)
+    if (torchActive) setTorchInternal(false, 0.0)
+    torchActive = false
+    stopOrientationSensor()
+    approachTracker.reset()
+    detectedFloorY = null
+    latestLightAnalysis = null
+    lastLumaSampleMs = 0L
     active = false
     latestSnapshot = null
     captureInProgress = false
@@ -180,9 +250,145 @@ class ArcorePerceptionController(
     closeCameraOnly()
   }
 
-  private fun scheduleTick() {
+  private fun scheduleTick(thermalState: String = currentThermalState()) {
     handler.removeCallbacks(tick)
-    if (active) handler.postDelayed(tick, settings.proximityIntervalMs)
+    if (active) handler.postDelayed(tick, effectiveProximityIntervalMs(thermalState))
+  }
+
+  private fun startOrientationSensor() {
+    stopOrientationSensor()
+    try {
+      val mgr = context.getSystemService(Context.SENSOR_SERVICE) as? SensorManager ?: return
+      val sensor = mgr.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
+        ?: mgr.getDefaultSensor(Sensor.TYPE_GEOMAGNETIC_ROTATION_VECTOR)
+        ?: return
+      sensorManager = mgr
+      mgr.registerListener(sensorListener, sensor, SensorManager.SENSOR_DELAY_UI, handler)
+    } catch (_: Exception) {
+      sensorManager = null
+    }
+  }
+
+  private fun stopOrientationSensor() {
+    try {
+      sensorManager?.unregisterListener(sensorListener)
+    } catch (_: Exception) {}
+    sensorManager = null
+    sensorHeadingDegrees = null
+    sensorPitchDegrees = null
+  }
+
+  private fun currentThermalState(): String {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return "nominal"
+    val powerManager = context.getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return "nominal"
+    return when (powerManager.currentThermalStatus) {
+      PowerManager.THERMAL_STATUS_NONE -> "nominal"
+      PowerManager.THERMAL_STATUS_LIGHT, PowerManager.THERMAL_STATUS_MODERATE -> "fair"
+      PowerManager.THERMAL_STATUS_SEVERE -> "serious"
+      PowerManager.THERMAL_STATUS_CRITICAL,
+      PowerManager.THERMAL_STATUS_EMERGENCY,
+      PowerManager.THERMAL_STATUS_SHUTDOWN -> "critical"
+      else -> "nominal"
+    }
+  }
+
+  private fun effectiveProximityIntervalMs(thermalState: String): Long {
+    val thermalFloor = when (thermalState) {
+      "critical" -> 380L
+      "serious" -> 280L
+      "fair" -> 180L
+      else -> 120L
+    }
+    return max(settings.proximityIntervalMs, thermalFloor)
+  }
+
+  private fun updateDetectedFloorY(currentSession: Session, camY: Float) {
+    try {
+      val planes = currentSession.getAllTrackables(Plane::class.java)
+      var lowestFloorY: Float? = null
+      for (plane in planes) {
+        if (plane.trackingState != TrackingState.TRACKING) continue
+        if (plane.type != Plane.Type.HORIZONTAL_UPWARD_FACING) continue
+        val y = plane.centerPose.ty()
+        if (y < camY - 0.65f && (lowestFloorY == null || y < lowestFloorY)) {
+          lowestFloorY = y
+        }
+      }
+      if (lowestFloorY != null) {
+        detectedFloorY = lowestFloorY
+      }
+    } catch (_: Exception) {
+      // Fall back to default camera height above floor when plane query is unavailable.
+    }
+  }
+
+  private fun setTorchInternal(enabled: Boolean, level: Double): Boolean {
+    val manager = context.getSystemService(Context.CAMERA_SERVICE) as? CameraManager ?: run {
+      torchActive = false
+      return false
+    }
+    if (cameraOnlyMode) {
+      val device = cameraDevice
+      val captureSession = cameraCaptureSession
+      val reader = cameraReader
+      val id = cameraId
+      if (device != null && captureSession != null && reader != null && id != null) {
+        return try {
+          val flashAvailable = manager.getCameraCharacteristics(id)
+            .get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true
+          if (!flashAvailable) {
+            torchActive = false
+            return false
+          }
+          val request = device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
+            addTarget(reader.surface)
+            set(
+              CaptureRequest.FLASH_MODE,
+              if (enabled) CaptureRequest.FLASH_MODE_TORCH else CaptureRequest.FLASH_MODE_OFF
+            )
+          }.build()
+          captureSession.setRepeatingRequest(request, null, handler)
+          torchActive = enabled
+          torchActive
+        } catch (_: Exception) {
+          torchActive = false
+          false
+        }
+      }
+    }
+
+    val id = try { session?.cameraConfig?.cameraId } catch (_: Exception) { null } ?: findCameraId()
+    if (id == null) {
+      torchActive = false
+      return false
+    }
+    return try {
+      val characteristics = manager.getCameraCharacteristics(id)
+      val flashAvailable = characteristics.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true
+      if (!flashAvailable) {
+        torchActive = false
+        return false
+      }
+      if (enabled && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        val maxStrength = characteristics.get(CameraCharacteristics.FLASH_INFO_STRENGTH_MAXIMUM_LEVEL) ?: 1
+        if (maxStrength > 1) {
+          val strength = (level.coerceIn(0.05, 1.0) * maxStrength).roundToInt().coerceIn(1, maxStrength)
+          manager.turnOnTorchWithStrengthLevel(id, strength)
+        } else {
+          manager.setTorchMode(id, true)
+        }
+      } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+        manager.setTorchMode(id, enabled)
+      } else {
+        torchActive = false
+        return false
+      }
+      torchActive = enabled
+      torchActive
+    } catch (_: Exception) {
+      torchActive = false
+      false
+    }
   }
 
   private val tick = object : Runnable {
@@ -327,42 +533,145 @@ class ArcorePerceptionController(
         "fresh" to (depthState == "available" && !stale), "issues" to healthIssues
       )
       val freshGeometry = depthState == "available" && camera.trackingState == TrackingState.TRACKING
+      val trackingReady = camera.trackingState == TrackingState.TRACKING
       if (captureOptions != null && age > settings.maximumFrameAgeMs) {
         throw PerceptionException("E_STALE_FRAME", "The latest camera frame is stale. Wait for fresh tracking before capturing.")
       }
+      val nowMs = System.currentTimeMillis()
       var image: Map<String, Any>? = null
       var ocr: List<Map<String, Any>> = emptyList()
       if (captureOptions != null) {
-        cameraImage = frame.acquireCameraImage()
+        val acquired = frame.acquireCameraImage()
+        cameraImage = acquired
+        LightAnalyzer.analyze(acquired)?.let {
+          latestLightAnalysis = it
+          lastLumaSampleMs = nowMs
+        }
         val activity = activityProvider() ?: throw PerceptionException("E_ACTIVITY", "The Android activity is unavailable.")
         val rotation = SceneImage.rotationDegrees(activity, current.cameraConfig.cameraId)
         val recognizeText = captureOptions["recognizeText"] as? Boolean ?: settings.recognizeText
         if (recognizeText) {
-          ocr = recognize(cameraImage, frame, rotation, if (depthState == "available") depthImage else null, confidenceImage)
+          ocr = recognize(acquired, frame, rotation, if (depthState == "available") depthImage else null, confidenceImage)
         }
         val includeImage = captureOptions["includeImage"] as? Boolean ?: true
         if (includeImage) {
           val quality = (captureOptions["jpegQuality"] as? Number)?.toDouble() ?: 0.85
           val maxImageLongEdge = (captureOptions["maxImageLongEdge"] as? Number)?.toInt()
-          image = SceneImage.writeJPEG(activity, cameraImage, rotation, (quality * 100).toInt(), cameraTimestamp, maxImageLongEdge)
+          image = SceneImage.writeJPEG(activity, acquired, rotation, (quality * 100).toInt(), cameraTimestamp, maxImageLongEdge)
+        }
+      } else if (nowMs - lastLumaSampleMs >= 500L || latestLightAnalysis == null) {
+        try {
+          val acquired = frame.acquireCameraImage()
+          cameraImage = acquired
+          LightAnalyzer.analyze(acquired)?.let {
+            latestLightAnalysis = it
+            lastLumaSampleMs = nowMs
+          }
+        } catch (_: Exception) {
+          // Camera image may not be ready on early ARCore ticks; retain last luma reading.
         }
       }
+
+      camera.pose.toMatrix(poseMatrix, 0)
+      if (trackingReady) {
+        updateDetectedFloorY(current, poseMatrix[13])
+      }
+      val pitchDegrees = if (trackingReady) {
+        CorridorAnalyzer.cameraPitchDegrees(poseMatrix)
+      } else {
+        sensorPitchDegrees ?: CorridorAnalyzer.cameraPitchDegrees(poseMatrix)
+      }
+      val headingDegrees = sensorHeadingDegrees
+      var aimState = CorridorAnalyzer.aimState(pitchDegrees = pitchDegrees, mountMode = settings.mountMode)
+      var corridorDict: Map<String, Any>? = null
+      var hazardsList: List<Map<String, Any>> = emptyList()
+      var depthSource = "unavailable"
+      val timestampSec = frame.timestamp / 1_000_000_000.0
+      val dImg = depthImage
+      val cImg = confidenceImage
+
+      if (freshGeometry && dImg != null && cImg != null) {
+        val rawCorridor = CorridorAnalyzer.analyze(
+          depthImage = dImg,
+          confidenceImage = cImg,
+          intrinsics = camera.imageIntrinsics,
+          poseMatrix = poseMatrix,
+          headingDegrees = headingDegrees,
+          knownFloorY = detectedFloorY,
+          mountMode = settings.mountMode,
+          warningDistance = settings.warningDistance,
+          criticalDistance = settings.criticalDistance
+        )
+        val approach = approachTracker.update(
+          timestampSec = timestampSec,
+          poseMatrix = poseMatrix,
+          sectors = rawCorridor.sectors,
+          aimState = rawCorridor.aimState
+        )
+        val corridor = rawCorridor.applying(approach)
+        aimState = corridor.aimState
+        corridorDict = corridor.toMap()
+        hazardsList = corridor.hazardMaps(cameraTimestamp)
+        depthSource = if (corridor.valid) "lidar" else "unavailable"
+      } else if (!stale && trackingReady && depthImage == null && aimState != "lowered") {
+        approachTracker.reset()
+        var pointCloud: PointCloud? = null
+        try {
+          pointCloud = frame.acquirePointCloud()
+          val fallbackCorridor = CorridorAnalyzer.analyzePointCloud(
+            points = pointCloud.points,
+            poseMatrix = poseMatrix,
+            headingDegrees = headingDegrees,
+            knownFloorY = detectedFloorY,
+            mountMode = settings.mountMode,
+            warningDistance = settings.warningDistance,
+            criticalDistance = settings.criticalDistance
+          )
+          if (fallbackCorridor.valid) {
+            aimState = fallbackCorridor.aimState
+            corridorDict = fallbackCorridor.toMap()
+            hazardsList = fallbackCorridor.hazardMaps(cameraTimestamp)
+            depthSource = "feature-points"
+          }
+        } catch (_: Exception) {
+          // Point cloud may be temporarily unavailable during relocalization.
+        } finally {
+          try { pointCloud?.release() } catch (_: Exception) {}
+        }
+      } else {
+        approachTracker.reset()
+      }
+
+      val thermalState = currentThermalState()
+      val proactiveVlmAllowed = thermalState == "nominal" || thermalState == "fair"
+
       val snapshot = mutableMapOf<String, Any?>(
         "id" to UUID.randomUUID().toString(), "source" to "arcore",
         "mode" to (if (captureOptions == null) "proximity" else "capture"),
         "cameraTimestampMs" to cameraTimestamp, "depthTimestampMs" to depthTimestamp,
         "capturedAtMs" to System.currentTimeMillis().toDouble(), "trackingState" to tracking(camera.trackingState),
         "trackingReason" to trackingReason(camera.trackingState), "depthState" to depthState,
+        "depthSource" to depthSource, "thermalState" to thermalState,
+        "proactiveVlmAllowed" to proactiveVlmAllowed,
         "confidence" to (if (freshGeometry) analysis?.confidence ?: 0.0 else 0.0),
         "sensorHealth" to sensorHealth, "obstacles" to (if (freshGeometry) analysis?.obstacles ?: emptyList() else emptyList()),
-        "objects" to emptyList<Map<String, Any>>(), "freeSeats" to emptyList<Map<String, Any>>(), "ocr" to ocr
+        "objects" to emptyList<Map<String, Any>>(), "freeSeats" to emptyList<Map<String, Any>>(), "ocr" to ocr,
+        "aimState" to aimState, "pitchDegrees" to pitchDegrees, "hazards" to hazardsList
       )
+      latestLightAnalysis?.let {
+        snapshot["lightingState"] = it.lightingState
+        snapshot["ambientLuma"] = it.ambientLuma
+      }
+      headingDegrees?.let { snapshot["headingDegrees"] = it }
+      corridorDict?.let { snapshot["corridor"] = it }
       image?.let { snapshot["image"] = it }
       latestSnapshot = snapshot
       emit("onSnapshot", snapshot)
       if (captureOptions == null) {
         emit("onStatus", status(snapshot))
-        if (freshGeometry) emitWarnings(snapshot)
+        if (depthSource != "unavailable" && trackingReady && aimState != "lowered" && aimState != "covered") {
+          emitWarnings(snapshot)
+        }
       }
       return snapshot
     } finally {
@@ -432,10 +741,16 @@ class ArcorePerceptionController(
                 try {
                   val request = device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
                     addTarget(openedReader.surface)
+                    if (torchActive) {
+                      set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_TORCH)
+                    }
                   }.build()
                   captureSession.setRepeatingRequest(request, null, handler)
                   active = true
                   latestSnapshot = null
+                  latestLightAnalysis = null
+                  lastLumaSampleMs = 0L
+                  startOrientationSensor()
                   val result = mutableMapOf<String, Any?>("active" to true, "capabilities" to capabilities())
                   settings.stepLength?.let { result["stepLengthMeters"] = it }
                   cameraStartCompletion = null
@@ -544,6 +859,12 @@ class ArcorePerceptionController(
     )
     val trackingState = if (stale) "paused" else "normal"
     val trackingReason = if (stale) "No fresh camera frame is available." else null
+    if (cameraImage != null) {
+      LightAnalyzer.analyze(cameraImage)?.let {
+        latestLightAnalysis = it
+        lastLumaSampleMs = now
+      }
+    }
     var image: Map<String, Any>? = null
     var ocr: List<Map<String, Any>> = emptyList()
     if (captureOptions != null && cameraImage != null) {
@@ -558,16 +879,28 @@ class ArcorePerceptionController(
         image = SceneImage.writeJPEG(activity, cameraImage, rotation, (quality * 100).toInt(), cameraTimestamp!!, maxImageLongEdge)
       }
     }
+    val pitchDegrees = sensorPitchDegrees ?: 0.0
+    val aimState = CorridorAnalyzer.aimState(pitchDegrees = pitchDegrees, mountMode = settings.mountMode)
+    val thermalState = currentThermalState()
+    val proactiveVlmAllowed = thermalState == "nominal" || thermalState == "fair"
     val snapshot = mutableMapOf<String, Any?>(
       "id" to UUID.randomUUID().toString(), "source" to "camera2",
       "mode" to (if (captureOptions == null) "proximity" else "capture"),
       "cameraTimestampMs" to cameraTimestamp, "depthTimestampMs" to null,
       "capturedAtMs" to now.toDouble(), "trackingState" to trackingState,
       "trackingReason" to trackingReason, "depthState" to "unsupported",
+      "depthSource" to "unavailable", "thermalState" to thermalState,
+      "proactiveVlmAllowed" to proactiveVlmAllowed,
       "confidence" to 0.0, "sensorHealth" to sensorHealth,
       "obstacles" to emptyList<Map<String, Any>>(), "objects" to emptyList<Map<String, Any>>(),
-      "freeSeats" to emptyList<Map<String, Any>>(), "ocr" to ocr
+      "freeSeats" to emptyList<Map<String, Any>>(), "ocr" to ocr,
+      "aimState" to aimState, "pitchDegrees" to pitchDegrees, "hazards" to emptyList<Map<String, Any>>()
     )
+    latestLightAnalysis?.let {
+      snapshot["lightingState"] = it.lightingState
+      snapshot["ambientLuma"] = it.ambientLuma
+    }
+    sensorHeadingDegrees?.let { snapshot["headingDegrees"] = it }
     image?.let { snapshot["image"] = it }
     latestSnapshot = snapshot
     emit("onSnapshot", snapshot)
@@ -629,19 +962,110 @@ class ArcorePerceptionController(
     return output
   }
 
+  @Suppress("UNCHECKED_CAST")
   private fun emitWarnings(snapshot: Map<String, Any?>) {
-    val obstacles = (snapshot["obstacles"] as? List<Map<String, Any>>) ?: emptyList()
-    for (obstacle in obstacles) {
-      val distance = obstacle["nearestDistanceMeters"] as? Double ?: continue
-      if (distance > settings.warningDistance) continue
-      val warning = mapOf<String, Any?>(
-        "timestampMs" to System.currentTimeMillis().toDouble(), "snapshotId" to snapshot["id"],
-        "severity" to (if (distance <= settings.criticalDistance) "critical" else "warning"),
-        "sector" to obstacle["sector"], "direction" to obstacle["direction"],
-        "distanceMeters" to distance, "robustDistanceMeters" to obstacle["robustDistanceMeters"],
-        "confidence" to obstacle["meanConfidence"], "obstacle" to obstacle
+    val nowMs = (snapshot["cameraTimestampMs"] as? Number)?.toDouble() ?: System.currentTimeMillis().toDouble()
+    val hazards = (snapshot["hazards"] as? List<Map<String, Any?>>) ?: emptyList()
+
+    // Priority 1: Fast-approaching hazard (cyclist, runner, scooter, loose dog)
+    val fastMover = hazards.firstOrNull { (it["kind"] as? String) == "fast-mover" }
+    if (fastMover != null) {
+      val payload = mutableMapOf<String, Any?>(
+        "id" to (fastMover["id"] as? String ?: "arcore-fast-mover"),
+        "kind" to "fast-mover",
+        "timestampMs" to nowMs,
+        "severity" to "critical",
+        "direction" to mapOf(
+          "bearing" to (fastMover["direction"] as? String ?: "ahead"),
+          "yawDegrees" to ((fastMover["bearingDegrees"] as? Number)?.toDouble() ?: 0.0)
+        ),
+        "distanceMeters" to ((fastMover["distanceMeters"] as? Number)?.toDouble() ?: 0.0),
+        "message" to (fastMover["message"] as? String ?: "Fast movement ahead — hold still.")
       )
-      emit("onWarning", warning)
+      (fastMover["closingSpeedMps"] as? Number)?.toDouble()?.let { payload["closingSpeedMps"] = it }
+      (fastMover["externalSpeedMps"] as? Number)?.toDouble()?.let { payload["externalSpeedMps"] = it }
+      (fastMover["ttcSeconds"] as? Number)?.toDouble()?.let { payload["ttcSeconds"] = it }
+      emit("onWarning", payload)
+      return
+    }
+
+    // Priority 2: Vertical hazards (head-height overhang, drop-off, step-down, step-up)
+    val verticalHazard = hazards.firstOrNull {
+      val kind = it["kind"] as? String ?: ""
+      kind == "head-height" || kind == "drop-off" || kind == "step-down" || kind == "step-up"
+    }
+    if (verticalHazard != null) {
+      val kind = verticalHazard["kind"] as? String ?: "obstacle"
+      emit(
+        "onWarning",
+        mapOf(
+          "id" to (verticalHazard["id"] as? String ?: "arcore-vertical-hazard"),
+          "kind" to kind,
+          "timestampMs" to nowMs,
+          "severity" to (if (verticalHazard["severity"] == "urgent") "critical" else "warning"),
+          "direction" to mapOf(
+            "bearing" to (verticalHazard["direction"] as? String ?: "ahead"),
+            "yawDegrees" to ((verticalHazard["bearingDegrees"] as? Number)?.toDouble() ?: 0.0)
+          ),
+          "distanceMeters" to ((verticalHazard["distanceMeters"] as? Number)?.toDouble() ?: 0.0),
+          "message" to (verticalHazard["message"] as? String ?: "Hazard ahead.")
+        )
+      )
+      return
+    }
+
+    // Priority 3: Nearest static obstacle within warningDistance (suppressed if receding unless critical)
+    val corridor = snapshot["corridor"] as? Map<String, Any?>
+    val receding = corridor?.get("recedingObstacle") as? Boolean ?: false
+    val obstacles = ((snapshot["obstacles"] as? List<Map<String, Any?>>) ?: emptyList())
+      .filter { ((it["nearestDistanceMeters"] as? Number)?.toDouble() ?: Double.POSITIVE_INFINITY) <= settings.warningDistance }
+    val nearestObstacle = obstacles.minByOrNull {
+      (it["nearestDistanceMeters"] as? Number)?.toDouble() ?: Double.POSITIVE_INFINITY
+    }
+    if (nearestObstacle != null) {
+      val distance = (nearestObstacle["nearestDistanceMeters"] as? Number)?.toDouble() ?: return
+      if (!receding || distance <= settings.criticalDistance) {
+        emit(
+          "onWarning",
+          mapOf(
+            "id" to "arcore-live-obstacle",
+            "kind" to "obstacle",
+            "timestampMs" to nowMs,
+            "snapshotId" to snapshot["id"],
+            "severity" to (if (distance <= settings.criticalDistance) "critical" else "warning"),
+            "sector" to nearestObstacle["sector"],
+            "direction" to nearestObstacle["direction"],
+            "distanceMeters" to distance,
+            "robustDistanceMeters" to (nearestObstacle["robustDistanceMeters"] ?: distance),
+            "confidence" to nearestObstacle["meanConfidence"],
+            "obstacle" to nearestObstacle
+          )
+        )
+      }
+      return
+    }
+
+    // Priority 4: Feature-point fallback corridor obstacle when dense raw depth is unavailable
+    val fallbackObstacle = hazards.firstOrNull { (it["kind"] as? String) == "obstacle" }
+    if (fallbackObstacle != null) {
+      val distance = (fallbackObstacle["distanceMeters"] as? Number)?.toDouble() ?: return
+      if (distance <= settings.warningDistance && (!receding || distance <= settings.criticalDistance)) {
+        emit(
+          "onWarning",
+          mapOf(
+            "id" to (fallbackObstacle["id"] as? String ?: "arcore-corridor-obstacle"),
+            "kind" to "obstacle",
+            "timestampMs" to nowMs,
+            "severity" to (if (distance <= settings.criticalDistance) "critical" else "warning"),
+            "direction" to mapOf(
+              "bearing" to (fallbackObstacle["direction"] as? String ?: "ahead"),
+              "yawDegrees" to ((fallbackObstacle["bearingDegrees"] as? Number)?.toDouble() ?: 0.0)
+            ),
+            "distanceMeters" to distance,
+            "message" to (fallbackObstacle["message"] as? String ?: "Obstacle ahead.")
+          )
+        )
+      }
     }
   }
 

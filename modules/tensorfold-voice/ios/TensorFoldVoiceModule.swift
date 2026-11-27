@@ -64,5 +64,13 @@ public final class TensorFoldVoiceModule: Module {
       self.controller.spatialAudio.stopAll()
       self.controller.deactivateAudioIfIdle()
     }.runOnQueue(.main)
+
+    AsyncFunction("setRemoteControlsEnabled") { (enabled: Bool) in
+      self.controller.setRemoteControlsEnabled(enabled)
+    }.runOnQueue(.main)
+
+    AsyncFunction("updateNowPlaying") { (title: String, subtitle: String) in
+      self.controller.updateNowPlaying(title: title, subtitle: subtitle)
+    }.runOnQueue(.main)
   }
 }

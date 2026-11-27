@@ -12,7 +12,12 @@ struct PerceptionTests {
     checkLiveObstacleIdentity()
     checkCorridorAnalyzer()
     checkApproachDoorwaysAndStandby()
-    print("iOS perception checks passed: timestamps, portrait projection, depth buffers, alignment dwell, obstacle identity, corridor analyzer, approach velocity, doorways, and standby.")
+    checkThermalGovernor()
+    checkLightAnalyzer()
+    checkLanyardCalibration()
+    checkMonocularDepthFallback()
+    checkPerceptionContractFields()
+    print("iOS perception checks passed: timestamps, portrait projection, depth buffers, alignment dwell, obstacle identity, corridor analyzer, approach velocity, doorways, standby, thermal governor, light analyzer, lanyard calibration, monocular fallback, and contract fields.")
   }
 
   static func checkLiveObstacleIdentity() {
@@ -313,6 +318,241 @@ struct PerceptionTests {
       CorridorAnalyzer.analyze(samples: samples, intrinsics: intrinsics, imageSize: imageSize, cameraTransform: camAt(z: 0, pitchDeg: 0), headingAligned: true, knownFloorY: 0)
     }!
     expect(covered.aimState == "covered" && !covered.valid && covered.hazards.isEmpty, "Lens covered by hand or pocket must enter covered standby with no hazards")
+  }
+
+  static func checkThermalGovernor() {
+    let nominalMoving = ThermalGovernor.policy(thermalState: "nominal", isStationary: false)
+    expect(nominalMoving.proximityIntervalMs == 120.0 && nominalMoving.visionIntervalSec == 0.55 && nominalMoving.proactiveVlmAllowed, "Nominal moving policy must use 120ms proximity, 0.55s vision, proactive VLM enabled")
+
+    let nominalStill = ThermalGovernor.policy(thermalState: "nominal", isStationary: true)
+    expect(nominalStill.proximityIntervalMs == 220.0 && nominalStill.visionIntervalSec == 1.2 && nominalStill.proactiveVlmAllowed, "Nominal stationary policy must relax to 220ms proximity and 1.2s vision")
+
+    let fairMoving = ThermalGovernor.policy(thermalState: "fair", isStationary: false)
+    expect(fairMoving.proximityIntervalMs == 180.0 && fairMoving.visionIntervalSec == 0.95 && fairMoving.proactiveVlmAllowed, "Fair moving policy must use 180ms proximity and 0.95s vision with VLM enabled")
+
+    let fairStill = ThermalGovernor.policy(thermalState: "fair", isStationary: true)
+    expect(fairStill.proximityIntervalMs == 300.0 && fairStill.visionIntervalSec == 0.95 && fairStill.proactiveVlmAllowed, "Fair stationary policy must use 300ms proximity")
+
+    let serious = ThermalGovernor.policy(thermalState: "serious", isStationary: false)
+    expect(serious.proximityIntervalMs == 280.0 && serious.visionIntervalSec == 1.6 && !serious.proactiveVlmAllowed, "Serious thermal policy must disable proactive VLM while keeping proximity alive at 280ms")
+
+    let critical = ThermalGovernor.policy(thermalState: "critical", isStationary: true)
+    expect(critical.proximityIntervalMs == 380.0 && critical.visionIntervalSec == 2.5 && !critical.proactiveVlmAllowed, "Critical thermal policy must throttle to 380ms/2.5s and disable proactive VLM")
+
+    // Respect slower caller-configured base proximity interval
+    let customBase = ThermalGovernor.policy(thermalState: "nominal", isStationary: false, baseProximityIntervalMs: 250.0)
+    expect(customBase.proximityIntervalMs == 250.0, "Governor must never speed up past user baseProximityIntervalMs")
+
+    // Stationary tracker over 3s sliding window
+    let tracker = StationaryTracker(windowSeconds: 3.0, movementThresholdMeters: 0.25)
+    expect(!tracker.observe(timestamp: 10.0, position: SIMD3(0, 1.15, 0)), "Initial sample cannot be stationary")
+    expect(!tracker.observe(timestamp: 11.5, position: SIMD3(0.03, 1.15, -0.02)), "1.5s elapsed is still under 3s window")
+    expect(tracker.observe(timestamp: 13.05, position: SIMD3(0.04, 1.15, 0.02)), "3s of small sway (<0.25m) must classify as stationary")
+    expect(!tracker.observe(timestamp: 13.5, position: SIMD3(0.04, 1.15, -0.60)), "Walking 0.6m must immediately clear stationary state")
+    expect(!tracker.observe(timestamp: 15.0, position: SIMD3(0.04, 1.15, -0.62)), "Stopping for only 1.5s is not yet stationary")
+    expect(tracker.observe(timestamp: 16.6, position: SIMD3(0.05, 1.15, -0.61)), "Stopping for 3s at new position must return to stationary")
+  }
+
+  static func checkLightAnalyzer() {
+    // 1. YCbCr 420f bi-planar Y-plane sampling (ARKit native format)
+    let yuv = buffer(64, 48, format: kCVPixelFormatType_420YpCbCr8BiPlanarFullRange)
+
+    fillPlane0(yuv, with: 18) // ~0.07 -> dark
+    let darkYuv = LightAnalyzer.analyze(pixelBuffer: yuv)!
+    expect(darkYuv.lightingState == "dark" && darkYuv.luma < 0.14 && darkYuv.sampleCount > 0, "Low Y-plane luma must classify as dark")
+
+    fillPlane0(yuv, with: 54) // ~0.21 -> dim
+    let dimYuv = LightAnalyzer.analyze(pixelBuffer: yuv)!
+    expect(dimYuv.lightingState == "dim" && dimYuv.luma >= 0.14 && dimYuv.luma < 0.28, "Mid-low Y-plane luma must classify as dim")
+
+    fillPlane0(yuv, with: 180) // ~0.71 -> good
+    let goodYuv = LightAnalyzer.analyze(pixelBuffer: yuv)!
+    expect(goodYuv.lightingState == "good" && goodYuv.luma >= 0.28, "Bright Y-plane luma must classify as good")
+
+    // 2. BGRA fallback sampling
+    let bgra = buffer(64, 48, format: kCVPixelFormatType_32BGRA)
+
+    fillBGRA(bgra, r: 10, g: 12, b: 10)
+    let darkBGRA = LightAnalyzer.analyze(pixelBuffer: bgra)!
+    expect(darkBGRA.lightingState == "dark" && darkBGRA.luma < 0.14, "Dark BGRA frame must classify as dark")
+
+    fillBGRA(bgra, r: 52, g: 56, b: 50)
+    let dimBGRA = LightAnalyzer.analyze(pixelBuffer: bgra)!
+    expect(dimBGRA.lightingState == "dim" && dimBGRA.luma >= 0.14 && dimBGRA.luma < 0.28, "Dim BGRA frame must classify as dim")
+
+    fillBGRA(bgra, r: 210, g: 210, b: 205)
+    let goodBGRA = LightAnalyzer.analyze(pixelBuffer: bgra)!
+    expect(goodBGRA.lightingState == "good" && goodBGRA.luma >= 0.28, "Bright BGRA frame must classify as good")
+  }
+
+  static func checkLanyardCalibration() {
+    // At -42 deg downward hang: handheld complains too-low, lanyard (+14 deg -> -28 deg) is level!
+    expect(CorridorAnalyzer.aimState(pitchDegrees: -42.0, mountMode: "handheld") == "too-low", "Handheld at -42 deg must report too-low")
+    expect(CorridorAnalyzer.aimState(pitchDegrees: -42.0, mountMode: "lanyard") == "level", "Lanyard at -42 deg (+14 deg compensation) must report level")
+
+    // At -62 deg: handheld enters lowered standby (<-58), lanyard stays active (requires <-68)
+    expect(CorridorAnalyzer.aimState(pitchDegrees: -62.0, mountMode: "handheld") == "lowered", "Handheld at -62 deg must enter lowered standby")
+    expect(CorridorAnalyzer.aimState(pitchDegrees: -62.0, mountMode: "lanyard") == "too-low", "Lanyard at -62 deg must not falsely enter lowered standby")
+
+    // At -70 deg: lanyard finally enters lowered standby (<-68)
+    expect(CorridorAnalyzer.aimState(pitchDegrees: -70.0, mountMode: "lanyard") == "lowered", "Lanyard below -68 deg must enter lowered standby")
+
+    // Verify CorridorAnalyzer.analyze respects mountMode end-to-end
+    let w = 48
+    let h = 36
+    let imageSize = CGSize(width: 960, height: 720)
+    let intrinsics = simd_float3x3(columns: (
+      SIMD3<Float>(650, 0, 0),
+      SIMD3<Float>(0, 650, 0),
+      SIMD3<Float>(480, 360, 1)
+    ))
+    let depth = buffer(w, h, format: kCVPixelFormatType_DepthFloat32)
+    let conf = buffer(w, h, format: kCVPixelFormatType_OneComponent8)
+    fill(conf, with: UInt8(2))
+    fill(depth, with: Float(3.5))
+    let map = DepthMap(depth: depth, confidence: conf, imageSize: imageSize)!
+
+    func camWithPitch(_ deg: Double) -> simd_float4x4 {
+      let rad = Float(deg * Double.pi / 180.0)
+      return simd_float4x4(columns: (
+        SIMD4<Float>(1, 0, 0, 0),
+        SIMD4<Float>(0, cos(rad), sin(rad), 0),
+        SIMD4<Float>(0, -sin(rad), cos(rad), 0),
+        SIMD4<Float>(0, 1.15, 0, 1)
+      ))
+    }
+
+    let lanyardLevel = map.read { samples in
+      CorridorAnalyzer.analyze(samples: samples, intrinsics: intrinsics, imageSize: imageSize, cameraTransform: camWithPitch(-42), headingAligned: true, knownFloorY: 0, mountMode: "lanyard")
+    }!
+    expect(lanyardLevel.valid && lanyardLevel.aimState == "level", "Chest-mounted phone at -42 deg must produce a valid level corridor analysis")
+
+    let lanyardLowered = map.read { samples in
+      CorridorAnalyzer.analyze(samples: samples, intrinsics: intrinsics, imageSize: imageSize, cameraTransform: camWithPitch(-72), headingAligned: true, knownFloorY: 0, mountMode: "lanyard")
+    }!
+    expect(!lanyardLowered.valid && lanyardLowered.aimState == "lowered" && lanyardLowered.hazards.isEmpty, "Lanyard phone below -68 deg must enter standby with zero hazards")
+  }
+
+  static func checkMonocularDepthFallback() {
+    let levelNorth = simd_float4x4(columns: (
+      SIMD4<Float>(1, 0, 0, 0),
+      SIMD4<Float>(0, 1, 0, 0),
+      SIMD4<Float>(0, 0, 1, 0),
+      SIMD4<Float>(0, 1.15, 0, 1)
+    ))
+
+    // 1. Sparse feature points blocking center & left at 1.2m while right is open -> narrow, steer right
+    var points: [SIMD3<Float>] = []
+    for i in 0..<8 {
+      let x = Float(-0.6 + Double(i) * 0.12) // spans left to ahead
+      let y = Float(0.6 + Double(i % 3) * 0.35) // inside 0.25m..1.85m torso band
+      points.append(SIMD3<Float>(x, y, -1.2))
+    }
+    // Add out-of-band floor & ceiling points that must be ignored
+    for i in 0..<10 {
+      points.append(SIMD3<Float>(Float(i) * 0.05, 0.05, -0.7)) // floor noise
+      points.append(SIMD3<Float>(Float(i) * 0.05, 2.40, -0.7)) // ceiling noise
+    }
+    let featureResult = MonocularDepthFallback.analyze(
+      featurePoints: points,
+      cameraTransform: levelNorth,
+      headingAligned: true,
+      knownFloorY: 0
+    )
+    expect(featureResult.valid, "Sufficient torso-band feature points must build a valid fallback corridor")
+    expect(featureResult.corridorState == "narrow", "Blocked center/left with open right should report narrow, got \(featureResult.corridorState)")
+    expect(featureResult.recommendedHeadingOffsetDeg >= 15.0, "Fallback corridor must steer right toward open space, got \(featureResult.recommendedHeadingOffsetDeg)")
+    expect(featureResult.hazards.contains(where: { $0.kind == "obstacle" && $0.distanceMeters < 1.5 }), "Close feature-point cluster ahead must emit obstacle hazard")
+
+    // 2. Insufficient points without visual detections -> invalid / unavailable
+    let tooSparse = MonocularDepthFallback.analyze(
+      featurePoints: [SIMD3<Float>(0, 1.0, -2.0), SIMD3<Float>(0.1, 1.0, -2.0)],
+      cameraTransform: levelNorth,
+      headingAligned: true,
+      knownFloorY: 0
+    )
+    expect(!tooSparse.valid && tooSparse.corridorState == "unknown", "Too few feature points must stay conservatively unavailable")
+
+    // 3. Visual height-prior distance hints (person ~1.68m, dog ~0.50m)
+    let personDist = MonocularDepthFallback.estimateDistanceMeters(label: "person", verticalSpanFraction: 0.50, verticalFocalNormalized: 0.80)!
+    expect(abs(personDist - 2.688) < 0.02, "Person height prior (1.68m) should estimate ~2.69m at 50% height")
+
+    let dogDist = MonocularDepthFallback.estimateDistanceMeters(label: "dog", verticalSpanFraction: 0.25, verticalFocalNormalized: 0.80)!
+    expect(abs(dogDist - 1.60) < 0.02, "Dog height prior (0.50m) should estimate ~1.60m at 25% height")
+
+    let visualOnly = MonocularDepthFallback.analyze(
+      featurePoints: [],
+      visualDetections: [
+        MonocularVisualDetection(label: "person", bearingDegrees: 0, verticalSpanFraction: 0.72, confidence: 0.85)
+      ],
+      cameraTransform: levelNorth,
+      headingAligned: true,
+      knownFloorY: 0,
+      verticalFocalNormalized: 0.80
+    )
+    expect(visualOnly.valid, "Visual height-prior detection without LiDAR must yield a conservative valid corridor")
+    expect(visualOnly.hazards.contains(where: { $0.kind == "obstacle" && $0.distanceMeters < 2.2 }), "Close visual person hint (~1.87m) must produce a forward obstacle hazard")
+  }
+
+  static func checkPerceptionContractFields() {
+    let native: [String: Any] = [
+      "id": "snap-1",
+      "cameraTimestampMs": 1_700_000_000_000.0,
+      "trackingState": "normal",
+      "depthState": "available",
+      "depthSource": "lidar",
+      "thermalState": "serious",
+      "proactiveVlmAllowed": false,
+      "lightingState": "dark",
+      "ambientLuma": 0.06,
+      "aimState": "level",
+      "pitchDegrees": -20.0,
+      "sensorHealth": ["issues": [] as [String]],
+      "obstacles": [] as [[String: Any]],
+      "objects": [] as [[String: Any]],
+      "freeSeats": [] as [[String: Any]],
+      "ocr": [] as [[String: Any]]
+    ]
+    let mapped = PerceptionContract.snapshot(native)
+    expect(mapped["depthSource"] as? String == "lidar", "Contract must expose depthSource")
+    expect(mapped["thermalState"] as? String == "serious", "Contract must expose thermalState")
+    expect(mapped["proactiveVlmAllowed"] as? Bool == false, "Contract must expose proactiveVlmAllowed")
+    expect(mapped["lightingState"] as? String == "dark", "Contract must expose lightingState")
+    expect(abs((mapped["ambientLuma"] as? Double ?? -1) - 0.06) < 0.0001, "Contract must expose ambientLuma")
+    let notes = mapped["notes"] as? [String] ?? []
+    expect(notes.contains(where: { $0.lowercased().contains("dark") && $0.lowercased().contains("lidar") }), "Dark lighting snapshot must note that LiDAR remains active in zero light")
+  }
+
+  static func fillPlane0(_ buffer: CVPixelBuffer, with value: UInt8) {
+    expect(CVPixelBufferLockBaseAddress(buffer, []) == kCVReturnSuccess, "Lock YUV fixture")
+    defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
+    let base = CVPixelBufferGetBaseAddressOfPlane(buffer, 0)!.assumingMemoryBound(to: UInt8.self)
+    let width = CVPixelBufferGetWidthOfPlane(buffer, 0)
+    let height = CVPixelBufferGetHeightOfPlane(buffer, 0)
+    let bytesPerRow = CVPixelBufferGetBytesPerRowOfPlane(buffer, 0)
+    for row in 0..<height {
+      for col in 0..<width {
+        base[row * bytesPerRow + col] = value
+      }
+    }
+  }
+
+  static func fillBGRA(_ buffer: CVPixelBuffer, r: UInt8, g: UInt8, b: UInt8) {
+    expect(CVPixelBufferLockBaseAddress(buffer, []) == kCVReturnSuccess, "Lock BGRA fixture")
+    defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
+    let base = CVPixelBufferGetBaseAddress(buffer)!.assumingMemoryBound(to: UInt8.self)
+    let width = CVPixelBufferGetWidth(buffer)
+    let height = CVPixelBufferGetHeight(buffer)
+    let bytesPerRow = CVPixelBufferGetBytesPerRow(buffer)
+    for row in 0..<height {
+      for col in 0..<width {
+        let idx = row * bytesPerRow + col * 4
+        base[idx] = b
+        base[idx + 1] = g
+        base[idx + 2] = r
+        base[idx + 3] = 255
+      }
+    }
   }
 
   static func fillWith(_ buffer: CVPixelBuffer, _ generator: (Int, Int) -> Float) {

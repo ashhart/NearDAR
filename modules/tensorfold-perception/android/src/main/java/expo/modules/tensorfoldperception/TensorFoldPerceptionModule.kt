@@ -74,6 +74,11 @@ class TensorFoldPerceptionModule : Module() {
     AsyncFunction("releaseCapture") { uri: String, promise: Promise ->
       controller.release(uri) { promise.resolve(it) }
     }
+
+    AsyncFunction("setTorch") { enabled: Boolean, level: Double?, promise: Promise ->
+      controller.setTorch(enabled, level ?: 0.6) { promise.resolve(it) }
+    }
+
     OnActivityEntersBackground {
       sendEvent("onPerceptionEvent", mapOf("type" to "lifecycle", "foreground" to false))
     }

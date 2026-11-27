@@ -20,6 +20,7 @@ final class VoiceController: NSObject, AVSpeechSynthesizerDelegate, SFSpeechReco
   var pendingStart: (generation: Int, promise: Promise)?
   var utterances: [ObjectIdentifier: TrackedUtterance] = [:]
   let spatialAudio = SpatialAudioEngine()
+  let remoteCommands = RemoteCommandController()
 
   lazy var synthesizer: AVSpeechSynthesizer = {
     let value = AVSpeechSynthesizer()
@@ -31,6 +32,33 @@ final class VoiceController: NSObject, AVSpeechSynthesizerDelegate, SFSpeechReco
   init(emit: @escaping (String, [String: Any]) -> Void) {
     self.emit = emit
     super.init()
+    remoteCommands.onTrigger = { [weak self] action in
+      self?.emitRemoteTrigger(action)
+    }
+  }
+
+  func setRemoteControlsEnabled(_ enabled: Bool) {
+    VoiceAudio.remoteControlsActive = enabled
+    remoteCommands.setEnabled(enabled)
+    if enabled {
+      if recognitionTask == nil && pendingStart == nil {
+        VoiceAudio.ensurePlaybackSessionForRemoteControls()
+      }
+    } else {
+      deactivateAudioIfIdle()
+    }
+  }
+
+  func updateNowPlaying(title: String, subtitle: String) {
+    remoteCommands.updateNowPlaying(title: title, subtitle: subtitle)
+  }
+
+  func emitRemoteTrigger(_ action: String) {
+    emit(VoiceEvent.voiceEvent, [
+      "type": "remoteTrigger",
+      "action": action,
+      "timestamp": voiceTimestamp()
+    ])
   }
 
   func emitListening(_ state: String, reason: String? = nil, sessionId: String? = nil) {
@@ -158,17 +186,33 @@ final class VoiceController: NSObject, AVSpeechSynthesizerDelegate, SFSpeechReco
       spatialAudio.stopAll()
       stopListening(reason: "audioInterruption")
       stopSpeaking(reason: "audioInterruption")
+    } else if type == .ended {
+      let optsRaw = notification.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
+      let options = AVAudioSession.InterruptionOptions(rawValue: optsRaw)
+      if options.contains(.shouldResume), remoteCommands.isEnabled {
+        VoiceAudio.ensurePlaybackSessionForRemoteControls()
+      }
     }
   }
 
   private func enteredBackground() {
+    if VoiceAudio.supportsBackgroundAudio && (remoteCommands.isEnabled || spatialAudio.isActive || synthesizer.isSpeaking || !utterances.isEmpty) {
+      if !remoteCommands.isEnabled {
+        stopListening(reason: "appBackground")
+      }
+      return
+    }
     spatialAudio.stopAll()
     stopListening(reason: "appBackground")
     stopSpeaking(reason: "appBackground")
   }
 
   func deactivateAudioIfIdle() {
-    if recognitionTask == nil && pendingStart == nil && utterances.isEmpty && !synthesizer.isSpeaking && !synthesizer.isPaused && !spatialAudio.isActive {
+    let isIdle = recognitionTask == nil && pendingStart == nil && utterances.isEmpty && !synthesizer.isSpeaking && !synthesizer.isPaused && !spatialAudio.isActive
+    guard isIdle else { return }
+    if remoteCommands.isEnabled {
+      VoiceAudio.ensurePlaybackSessionForRemoteControls()
+    } else {
       VoiceAudio.deactivate()
     }
   }
@@ -176,9 +220,12 @@ final class VoiceController: NSObject, AVSpeechSynthesizerDelegate, SFSpeechReco
   func shutdown() {
     observers.forEach(NotificationCenter.default.removeObserver)
     observers.removeAll()
+    remoteCommands.setEnabled(false)
+    VoiceAudio.remoteControlsActive = false
     spatialAudio.stopAll()
     stopListening(reason: "destroyed")
     stopSpeaking(reason: "destroyed")
+    VoiceAudio.deactivate()
   }
 
   func speechRecognizer(_ speechRecognizer: SFSpeechRecognizer, availabilityDidChange available: Bool) {

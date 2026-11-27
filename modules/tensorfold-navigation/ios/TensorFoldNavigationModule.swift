@@ -6,8 +6,16 @@ import MapKit
 private final class NavigationController: NSObject, CLLocationManagerDelegate {
   private let manager = CLLocationManager()
   private var tracking = false
+  private var backgroundEnabled = false
   private var pendingPermission: Promise?
   var emit: ((String, [String: Any]) -> Void)?
+
+  private var isBackgroundLocationSupported: Bool {
+    guard let modes = Bundle.main.object(forInfoDictionaryKey: "UIBackgroundModes") as? [String] else {
+      return false
+    }
+    return modes.contains("location")
+  }
 
   override init() {
     super.init()
@@ -33,8 +41,28 @@ private final class NavigationController: NSObject, CLLocationManagerDelegate {
       "platform": "ios",
       "mapKitDirections": true,
       "compassHeading": CLLocationManager.headingAvailable(),
-      "locationPermission": perm
+      "locationPermission": perm,
+      "backgroundSupported": isBackgroundLocationSupported
     ]
+  }
+
+  func setBackgroundEnabled(_ enabled: Bool) {
+    backgroundEnabled = enabled
+    applyBackgroundMode(enabled)
+  }
+
+  private func applyBackgroundMode(_ enabled: Bool) {
+    if enabled && isBackgroundLocationSupported {
+      manager.allowsBackgroundLocationUpdates = true
+      manager.pausesLocationUpdatesAutomatically = false
+      manager.showsBackgroundLocationIndicator = true
+    } else {
+      if manager.allowsBackgroundLocationUpdates {
+        manager.allowsBackgroundLocationUpdates = false
+      }
+      manager.pausesLocationUpdatesAutomatically = true
+      manager.showsBackgroundLocationIndicator = false
+    }
   }
 
   func startTracking(promise: Promise) {
@@ -56,6 +84,7 @@ private final class NavigationController: NSObject, CLLocationManagerDelegate {
 
   func stopTracking() {
     tracking = false
+    applyBackgroundMode(false)
     manager.stopUpdatingLocation()
     if CLLocationManager.headingAvailable() {
       manager.stopUpdatingHeading()
@@ -177,6 +206,9 @@ private final class NavigationController: NSObject, CLLocationManagerDelegate {
 
   private func beginUpdates() {
     tracking = true
+    if backgroundEnabled {
+      applyBackgroundMode(true)
+    }
     manager.startUpdatingLocation()
     if CLLocationManager.headingAvailable() {
       manager.startUpdatingHeading()
@@ -256,6 +288,10 @@ public final class TensorFoldNavigationModule: Module {
 
     AsyncFunction("stopTracking") {
       self.controller.stopTracking()
+    }.runOnQueue(.main)
+
+    AsyncFunction("setBackgroundEnabled") { (enabled: Bool) in
+      self.controller.setBackgroundEnabled(enabled)
     }.runOnQueue(.main)
 
     AsyncFunction("searchPlaces") { (query: String, nearLat: Double?, nearLng: Double?, promise: Promise) in

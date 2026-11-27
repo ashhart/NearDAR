@@ -3,6 +3,7 @@ import type { EventSubscription } from 'expo-modules-core';
 
 export type VoicePriority = 'ambient' | 'answer' | 'urgent';
 export type AudioRoute = 'headphones' | 'speaker' | 'unknown';
+export type RemoteControlAction = 'talk' | 'scan' | 'orient';
 export type VoiceEventType =
   | 'partial'
   | 'final'
@@ -12,6 +13,7 @@ export type VoiceEventType =
   | 'speechFinished'
   | 'speechStopped'
   | 'routeChanged'
+  | 'remoteTrigger'
   | 'error';
 export type ListeningState =
   | 'requestingPermission'
@@ -111,6 +113,7 @@ export interface VoiceCapabilities {
 export interface VoiceEvent {
   type: VoiceEventType;
   timestamp: number;
+  action?: RemoteControlAction;
   text?: string;
   message?: string | null;
   route?: AudioRoute;
@@ -144,6 +147,8 @@ declare class TensorFoldVoiceNativeModule extends NativeModule<VoiceEvents> {
   updateSpatialBeacon?(options: SpatialBeaconOptions): Promise<void>;
   playSpatialCue?(options: SpatialCueOptions): Promise<void>;
   stopSpatialAudio?(): Promise<void>;
+  setRemoteControlsEnabled?(enabled: boolean): Promise<void>;
+  updateNowPlaying?(title: string, subtitle: string): Promise<void>;
 }
 
 class UnavailableVoiceNativeModule extends NativeModule<VoiceEvents> {
@@ -223,6 +228,14 @@ export function playSpatialCue(options: SpatialCueOptions): Promise<void> {
 
 export function stopSpatialAudio(): Promise<void> {
   return Voice.stopSpatialAudio?.() ?? Promise.resolve();
+}
+
+export function setRemoteControlsEnabled(enabled: boolean): Promise<void> {
+  return Voice.setRemoteControlsEnabled?.(enabled) ?? Promise.resolve();
+}
+
+export function updateNowPlaying(title: string, subtitle: string): Promise<void> {
+  return Voice.updateNowPlaying?.(title, subtitle) ?? Promise.resolve();
 }
 
 export function addVoiceListener(listener: (event: VoiceEvent) => void): EventSubscription {

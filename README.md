@@ -14,15 +14,27 @@ NearDar turns an iPhone with LiDAR into a live walking companion you can follow 
 
 ### Unified Walking Satnav & Offline Resilience
 - **Turn-by-turn outdoor walking routes:** Native iOS `MapKit` walking directions and place search paired with `CoreLocation` GPS and drift-free `ARKit` `.gravityAndHeading` true-north compass.
+- **Hands-free pocket satnav & earbud controls:** Background `location` + `audio` modes keep spoken turns, 3D HRTF headphone beacons, and Lock Screen controls active while your phone is locked in your pocket. Trigger NearDar hands-free via AirPods stem or earbud media buttons (**click once** to talk, **double-click** to scan ahead, **triple-click** to orient yourself).
 - **Macro + micro steering fusion:** Follows your outdoor walking route and automatically blends into a gentle micro-detour when LiDAR detects an obstacle blocking the centre of the pavement with open space to the left or right.
-- **Works offline:** Persists saved places (e.g. *Home*, *Work*, *Station*) and caches walking routes locally. If you lose signal, NearDar falls back to cached routes, a direct offline compass/haptic beacon, or an automatic **breadcrumb return path** (*"Take me back"*).
+- **Works offline:** Persists saved places, cached walking routes, indoor relative spatial waypoints, direct compass/haptic beacons, and an automatic **breadcrumb return path** (*"Take me back"*).
 
-### Real-Time Street Hazards, Velocity Tracking & Living Presence
+### Real-Time Street Hazards, Perception Pro & Non-LiDAR Reach
 - **7-sector LiDAR corridor & vertical hazards:** Continuously maps shoulder-width clearance across `-45°` to `+45°` ahead, alerting early for **head-height overhangs**, **step-downs**, **drop-offs**, **step-ups**, and **blocked paths**.
 - **Fast-moving hazard detection (pushbikes, e-scooters, runners):** Multi-frame world-compensated `ApproachTracker` subtracts your own walking speed along every LiDAR sector ray and ignores camera pans—flagging approaching fast movers up to `4.3 m` away (`"Fast movement, 11 o'clock, 3 metres — hold still"`) while ignoring static walls you walk toward and de-escalating people walking away.
 - **Instant dog, cat & people awareness:** Runs Apple Vision `VNRecognizeAnimalsRequest` and `VNDetectHumanRectanglesRequest` together on the Neural Engine (~2 Hz), fused with live LiDAR depth to call out nearby **dogs, cats, people, and crowds** with distance and direction.
-- **Doorway & passage detection:** Detects deep openings flanked by walls (`>= 2.8 m` clearance) as you walk alongside building frontages.
-- **Automatic camera-lowered & lens-covered standby:** Lowering the phone past `-58°` or covering the lens smoothly enters standby—silencing LiDAR aim and obstacle chatter while keeping GPS route and compass guidance active until you raise the phone again.
+- **Thermal & battery governor:** Dynamically adapts polling cadence when stationary or warm (`nominal → fair → serious → critical`) and sheds ambient VLM chatter before battery/thermals degrade while keeping P0 LiDAR + CoreHaptics 100% live.
+- **Night & low-light awareness + adaptive torch:** Samples live Y-plane luma (`good | dim | dark`), warns honestly when camera visibility is dark while keeping 0-lux LiDAR protection active, and offers manual or automatic low-light torch assist for reading doors and signs.
+- **Non-LiDAR iPhone & Android parity:** Non-LiDAR iPhones fall back to ARKit `rawFeaturePoints` + visual height-prior corridor estimation; Android gets full Kotlin `CorridorAnalyzer`, `ApproachTracker`, `LightAnalyzer`, torch control, and 16-cue continuous `VibrationEffect` waveform haptics.
+- **Lanyard / chest-mount calibration & automatic standby:** Switch between **Handheld** and **Chest Lanyard** (`+14°` pitch compensation) carry modes. Lowering the phone or covering the lens smoothly enters standby while keeping GPS and compass guidance active.
+
+### Street Assistants, Mobility Profiles & Everyday Companion
+- **Personal Mobility Profiles:** One-tap O&M presets for **Balanced**, **White Cane** (suppresses routine low ground chatter the cane already sweeps), **Guide Dog Handler** (lets your dog route around routine static obstacles while emphasizing signs, doors, crossings, and fast movers), and **Low Vision** (enables OLED True-Black high-contrast HUD and step-edge emphasis).
+- **Last-20m Door Finder:** Automatically suggests entrance assistance within `25 m` of your destination—fusing LiDAR openings, ARKit door meshes, OCR shopfront text, and TensorFold vision to report door location, push/pull/automatic type, handle side, and entrance steps.
+- **Pedestrian Crossing Assistant:** Dedicated crossing check for tactile paving, dropped kerbs, push-button poles, crossing markings, and visible signals/vehicles—with strict safety guardrails that never claim a road is safe to cross.
+- **Public Transit & Bus Watcher:** Instant zero-VLM OCR route matcher (*"Watch for bus 73"*) that rejects prices/years/phone numbers, plus departure board, platform-edge, and carriage door/seat assistance.
+- **Vivid Scene & Guided Find:** Ask *"Describe the view"* for 3–4 rich atmospheric sentences, or *"Help me find oat milk"*, *"Check the expiry date"*, or *"What banknote is this?"*.
+- **Trusted / Emergency Contact Handoff:** Save a trusted contact in Settings and say *"Share my location"* (sends GPS coordinates, street, heading, and Apple Maps / OpenStreetMap links) or *"Call my emergency contact"*.
+- **Metric & Imperial Units + Screen Curtain:** Switch between **Metres** and **Feet & Miles**, Natural vs. **Clock-Face (`11 o'clock`)** phrasing, **OLED True-Black high contrast**, and a zero-glare **Screen Curtain** blackout overlay that keeps all touch gestures active.
 
 ### On-Device TensorFold Mobile Vision & Proactive Street Narrator
 - **Local TensorFold Mobile (`LFM3-VL-2B-MLX-4bit` on Metal):** Compiled locally from [`ashhart/TensorFold`](https://github.com/ashhart/TensorFold) via Zig `0.17` into a native iOS `XCFramework` (~1.5 GB one-time on-device model download). Vision, scene understanding, and multi-turn conversation run 100% locally with sentence-level streaming TTS (with automatic LiteRT-LM fallback on non-Metal Android devices).
@@ -52,9 +64,11 @@ NearDar turns an iPhone with LiDAR into a live walking companion you can follow 
 | **Double-Tap** *(or VoiceOver Magic Tap)* | Pause / resume sensors and guidance |
 
 ### Example voice commands
-- **Navigation:** *"Take me to the nearest pharmacy"*, *"Take me home"*, *"Take me back"*, *"Save this spot as Home"*, *"How far left?"*, *"Cancel route"*.
-- **Calm disorientation recovery:** *"I'm lost"*, *"Orient me"*, *"Help me get my bearings"* — speaks your street and compass heading, scans your immediate surroundings, and offers one-step return options.
-- **Live street & visual questions:** *"What's blocking the pavement?"*, *"Is there a doorway ahead?"*, *"Read that sign"*, *"Which way is open?"*, *"Where am I?"*, *"Which way am I facing?"*.
+- **Navigation & indoor waypoints:** *"Take me to the nearest pharmacy"*, *"Take me home"*, *"Take me back"*, *"Save this spot as Home"*, *"Remember this room as kitchen"*, *"Guide me to the kitchen"*, *"How far left?"*, *"Cancel route"*.
+- **Street assistants:** *"Find the door"*, *"Help me cross"*, *"Find the crossing button"*, *"Watch for bus 73"*, *"Transit mode"*, *"Describe the view"*, *"Help me find oat milk"*, *"Check the expiry date"*, *"What banknote is this?"*.
+- **Calm disorientation & safety:** *"I'm lost"*, *"Orient me"*, *"Share my location"*, *"Call my emergency contact"*.
+- **Profiles, lighting & display:** *"White cane profile"*, *"Guide dog mode"*, *"Low vision mode"*, *"Turn on the torch"*, *"Screen curtain on"*, *"Turn screen back on"*.
+- **Live street & visual questions:** *"What's blocking the pavement?"*, *"Read that sign"*, *"Which way is open?"*, *"Where am I?"*, *"Which way am I facing?"*.
 - **Mode & speech control:** *"Quiet mode"*, *"Explore mode"*, *"Full satnav mode"*, *"Repeat"*, *"Stop talking"*, *"Pause"*.
 
 ---
@@ -96,7 +110,7 @@ bun install --frozen-lockfile
 ./scripts/bootstrap-engine.sh
 cat vendor/TensorFold/.zig-version
 
-# Run TypeScript, ESLint, and 79 Bun unit tests
+# Run TypeScript, ESLint, and 119 Bun unit + street-replay benchmark tests
 bun run verify
 
 # Run native macOS Swift unit tests for LiDAR corridor, velocity, doorways & standby

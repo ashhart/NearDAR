@@ -5,7 +5,8 @@ import { Body, Button, Heading, Screen, StatusCard, TopBar, useColors } from '..
 import { VisionModelCard } from '../components/VisionModelCard'
 import { useAppSettings } from '../lib/SettingsContext'
 import { useSatnav } from '../lib/satnav/useSatnav'
-import type { DirectionStyle, SatnavMode, TalkGesture } from '../lib/guidance/types'
+import { MOBILITY_PROFILES, MOBILITY_PROFILE_ORDER } from '../lib/satnav/profiles'
+import type { DirectionStyle, DistanceUnit, MountMode, SatnavMode, TalkGesture } from '../lib/guidance/types'
 
 function Toggle({ label, caption, value, onChange }: { label: string; caption: string; value: boolean; onChange(value: boolean): void }) {
   const colors = useColors()
@@ -115,6 +116,22 @@ export default function Settings() {
         <Heading editorial focusOnEntry>Settings</Heading>
       </View>
 
+      <StatusCard title="Mobility Profile">
+        <Body muted>{MOBILITY_PROFILES[settings.mobilityProfile].shortDescription}</Body>
+        <View style={styles.options}>
+          {MOBILITY_PROFILE_ORDER.map((profile) => (
+            <Button
+              key={profile}
+              compact
+              secondary={settings.mobilityProfile !== profile}
+              selected={settings.mobilityProfile === profile}
+              label={MOBILITY_PROFILES[profile].label}
+              onPress={() => void satnav.applyMobilityProfile(profile)}
+            />
+          ))}
+        </View>
+      </StatusCard>
+
       <StatusCard title="Walking Mode & Talk Gesture">
         <Body>Default guidance mode</Body>
         <View style={styles.options}>
@@ -167,12 +184,69 @@ export default function Settings() {
           ))}
         </View>
 
+        <Body>Distance units</Body>
+        <View style={styles.options}>
+          {([
+            ['metric', 'Metres'],
+            ['imperial', 'Feet & miles'],
+          ] as [DistanceUnit, string][]).map(([distanceUnit, label]) => (
+            <Button
+              key={distanceUnit}
+              compact
+              secondary={settings.distanceUnit !== distanceUnit}
+              selected={settings.distanceUnit === distanceUnit}
+              label={label}
+              onPress={() => void update({ distanceUnit })}
+            />
+          ))}
+        </View>
+
         <Toggle
           label="OLED True-Black high contrast"
           caption="Pure black background with yellow and white contrast to eliminate glare for low-vision users."
           value={settings.oledHighContrast}
           onChange={(oledHighContrast) => void update({ oledHighContrast })}
         />
+      </StatusCard>
+
+      <StatusCard title="Hands-Free Carry & Pocket Satnav">
+        <Body>How you carry your phone</Body>
+        <View style={styles.options}>
+          {([
+            ['handheld', 'Handheld'],
+            ['lanyard', 'Chest lanyard'],
+          ] as [MountMode, string][]).map(([mountMode, label]) => (
+            <Button
+              key={mountMode}
+              compact
+              secondary={settings.mountMode !== mountMode}
+              selected={settings.mountMode === mountMode}
+              label={label}
+              onPress={() => void update({ mountMode })}
+            />
+          ))}
+        </View>
+        <Toggle
+          label="Keep satnav running in pocket"
+          caption="Keeps GPS turns, 3D audio beacons, and AirPods/earbud buttons active while your screen is locked."
+          value={settings.backgroundSatnav}
+          onChange={(backgroundSatnav) => void update({ backgroundSatnav })}
+        />
+        <Toggle
+          label="Screen curtain (blackout screen)"
+          caption="Blacks out the display for privacy and battery savings while all touch gestures stay active."
+          value={settings.screenCurtain}
+          onChange={(screenCurtain) => void update({ screenCurtain })}
+        />
+        <Toggle
+          label="Auto low-light torch assist"
+          caption="Gently enables the torch in very dark streets to help read signs and doors. LiDAR always works in darkness."
+          value={settings.autoTorch}
+          onChange={(autoTorch) => void update({ autoTorch })}
+        />
+        <Body muted>
+          Earbud shortcuts: click once to talk, double-click (Next Track) to scan ahead, triple-click (Previous Track) to orient yourself.
+        </Body>
       </StatusCard>
 
       <StatusCard title="Haptics & 3D Spatial Audio">
@@ -313,6 +387,30 @@ export default function Settings() {
         {satnav.cachedRoutes.length > 0 && (
           <Button compact secondary label="Clear cached routes" onPress={() => void satnav.clearRouteCache()} />
         )}
+      </StatusCard>
+
+      <StatusCard title="Trusted / Emergency Contact">
+        <Body muted>
+          Say “Share my location” or “Call my emergency contact” anytime to send your GPS pin and street address or dial for help.
+        </Body>
+        <TextInput
+          accessibilityLabel="Trusted contact name"
+          placeholder="Contact name (e.g. Alex)"
+          placeholderTextColor={colors.muted}
+          value={settings.emergencyContactName}
+          onChangeText={(emergencyContactName) => void update({ emergencyContactName })}
+          style={[styles.input, { color: colors.text, borderColor: colors.border, backgroundColor: colors.background }]}
+        />
+        <TextInput
+          accessibilityLabel="Trusted contact phone number"
+          keyboardType="phone-pad"
+          placeholder="Phone number (e.g. +44 7700 900123)"
+          placeholderTextColor={colors.muted}
+          value={settings.emergencyContactPhone}
+          onChangeText={(emergencyContactPhone) => void update({ emergencyContactPhone })}
+          style={[styles.input, { color: colors.text, borderColor: colors.border, backgroundColor: colors.background }]}
+        />
+        <Button compact secondary icon="share-social-outline" label="Test share my location" onPress={() => void satnav.shareLocationWithContact()} />
       </StatusCard>
 
       <StatusCard title="Privacy & Setup">

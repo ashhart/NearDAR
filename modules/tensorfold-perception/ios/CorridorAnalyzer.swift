@@ -390,9 +390,20 @@ enum CorridorAnalyzer {
     return degrees
   }
 
-  static func aimState(pitchDegrees: Double, coveredFraction: Double = 0.0) -> String {
+  static let lanyardPitchCompensationDegrees: Double = 14.0
+  static let handheldLoweredThresholdDegrees: Double = -58.0
+  static let lanyardLoweredThresholdDegrees: Double = -68.0
+
+  static func aimState(pitchDegrees: Double, coveredFraction: Double = 0.0, mountMode: String = "handheld") -> String {
     if coveredFraction >= 0.85 { return "covered" }
-    if pitchDegrees < -58.0 { return "lowered" }
+    if mountMode == "lanyard" {
+      if pitchDegrees < lanyardLoweredThresholdDegrees { return "lowered" }
+      let effectivePitch = pitchDegrees + lanyardPitchCompensationDegrees
+      if effectivePitch < -35.0 { return "too-low" }
+      if effectivePitch > 25.0 { return "too-high" }
+      return "level"
+    }
+    if pitchDegrees < handheldLoweredThresholdDegrees { return "lowered" }
     if pitchDegrees < -35.0 { return "too-low" }
     if pitchDegrees > 25.0 { return "too-high" }
     return "level"
@@ -461,10 +472,11 @@ enum CorridorAnalyzer {
     headingAligned: Bool,
     knownFloorY: Float? = nil,
     warningDistance: Double = 2.5,
-    criticalDistance: Double = 0.9
+    criticalDistance: Double = 0.9,
+    mountMode: String = "handheld"
   ) -> CorridorAnalysis {
     let pitch = cameraPitchDegrees(transform: cameraTransform)
-    let baseAim = aimState(pitchDegrees: pitch)
+    let baseAim = aimState(pitchDegrees: pitch, mountMode: mountMode)
     let heading = headingAligned ? cameraHeadingDegrees(transform: cameraTransform) : nil
 
     let camPos = SIMD3<Float>(cameraTransform.columns.3.x, cameraTransform.columns.3.y, cameraTransform.columns.3.z)
@@ -581,7 +593,7 @@ enum CorridorAnalyzer {
     }
 
     let coveredFraction = totalValid >= 10 ? Double(nearCoveredCount) / Double(totalValid) : 0.0
-    let aim = aimState(pitchDegrees: pitch, coveredFraction: coveredFraction)
+    let aim = aimState(pitchDegrees: pitch, coveredFraction: coveredFraction, mountMode: mountMode)
 
     guard totalValid >= 15, aim != "covered" else {
       return CorridorAnalysis(

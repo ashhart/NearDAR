@@ -1,8 +1,11 @@
 import type { GeoPoint } from '../../../modules/tensorfold-navigation/src'
+import type { DistanceUnit } from '../guidance/types'
 
 const EARTH_RADIUS_M = 6_371_000
 const DEG_TO_RAD = Math.PI / 180
 const RAD_TO_DEG = 180 / Math.PI
+const METERS_TO_FEET = 3.28084
+const METERS_PER_MILE = 1609.344
 
 export function haversineMeters(a: GeoPoint, b: GeoPoint): number {
   const dLat = (b.latitude - a.latitude) * DEG_TO_RAD
@@ -152,8 +155,31 @@ export function lookaheadPoint(polyline: GeoPoint[], proj: PolylineProjection, l
   return polyline[polyline.length - 1]!
 }
 
-export function formatWalkingDistance(meters: number, stepLengthMeters?: number): string {
+export function formatWalkingDistance(
+  meters: number,
+  stepLengthMeters?: number,
+  unit: DistanceUnit = 'metric',
+): string {
   if (!Number.isFinite(meters) || meters < 0) return 'unknown distance'
+
+  if (unit === 'imperial') {
+    if (meters < 0.9) return 'less than 3 feet'
+    if (meters < 8 && stepLengthMeters && stepLengthMeters >= 0.4 && stepLengthMeters <= 1.2) {
+      const steps = Math.max(1, Math.round(meters / stepLengthMeters))
+      return steps === 1 ? 'about 1 step' : `about ${steps} steps`
+    }
+    const feet = meters * METERS_TO_FEET
+    if (meters < 100) {
+      const rounded = feet < 30 ? Math.round(feet) : Math.round(feet / 5) * 5
+      return rounded === 1 ? '1 foot' : `${rounded} feet`
+    }
+    if (meters < 400) {
+      const rounded = Math.round(feet / 10) * 10
+      return `${rounded} feet`
+    }
+    return `${(meters / METERS_PER_MILE).toFixed(1)} miles`
+  }
+
   if (meters < 1.2) return 'less than a metre'
   if (meters < 8 && stepLengthMeters && stepLengthMeters >= 0.4 && stepLengthMeters <= 1.2) {
     const steps = Math.max(1, Math.round(meters / stepLengthMeters))

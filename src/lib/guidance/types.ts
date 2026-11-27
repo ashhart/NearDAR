@@ -7,6 +7,12 @@ export type Direction = 'ahead' | 'ahead-left' | 'ahead-right' | 'left' | 'right
 export type SatnavMode = 'satnav' | 'quiet' | 'explore'
 export type TalkGesture = 'tap' | 'hold'
 export type DirectionStyle = 'natural' | 'clock'
+export type MobilityProfile = 'standard' | 'cane' | 'guide-dog' | 'low-vision'
+export type DistanceUnit = 'metric' | 'imperial'
+export type MountMode = 'handheld' | 'lanyard'
+export type ThermalState = 'nominal' | 'fair' | 'serious' | 'critical'
+export type LightingState = 'good' | 'dim' | 'dark'
+export type DepthSource = 'lidar' | 'feature-points' | 'unavailable'
 
 export interface SceneObject {
   id: string
@@ -57,6 +63,11 @@ export interface SceneSnapshot {
   headingDegrees?: number
   aimState?: AimState
   pitchDegrees?: number
+  depthSource?: DepthSource
+  thermalState?: ThermalState
+  proactiveVlmAllowed?: boolean
+  lightingState?: LightingState
+  ambientLuma?: number
   notes: string[]
 }
 
@@ -107,6 +118,14 @@ export interface GuidanceSettings {
   directionStyle: DirectionStyle
   oledHighContrast: boolean
   warningDistanceMeters: number
+  mobilityProfile: MobilityProfile
+  distanceUnit: DistanceUnit
+  mountMode: MountMode
+  screenCurtain: boolean
+  backgroundSatnav: boolean
+  autoTorch: boolean
+  emergencyContactName: string
+  emergencyContactPhone: string
 }
 
 export interface GuidanceReply {

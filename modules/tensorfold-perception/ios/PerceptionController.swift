@@ -16,6 +16,10 @@ final class PerceptionController: NSObject, ARSessionDelegate {
   private var imageOrientation = CGImagePropertyOrientation.right
   private let meshes = MeshStore()
   private let approachTracker = ApproachTracker()
+  private let stationaryTracker = StationaryTracker()
+  private var latestThermalPolicy = ThermalGovernor.policy(thermalLevel: .nominal, isStationary: false)
+  private var latestLightAnalysis: LightAnalysis?
+  private var torchEnabledByController = false
   private var headingAligned = false
   private var detectedFloorY: Float?
   private var active = false
@@ -122,6 +126,13 @@ final class PerceptionController: NSObject, ARSessionDelegate {
           self.lastPersonScanFrameTime = nil
           self.meshes.clear()
           self.approachTracker.reset()
+          self.stationaryTracker.reset()
+          self.latestLightAnalysis = nil
+          self.latestThermalPolicy = ThermalGovernor.policy(
+            processThermalState: ProcessInfo.processInfo.thermalState,
+            isStationary: false,
+            baseProximityIntervalMs: self.settings.proximityIntervalMs
+          )
           self.startStaleTimer()
           var result: [String: Any] = ["active": true, "capabilities": self.capabilities()]
           if let length = self.settings.stepLength { result["stepLengthMeters"] = length }
@@ -163,8 +174,49 @@ final class PerceptionController: NSObject, ARSessionDelegate {
       PerceptionVision.pruneCaptures(directory: captureDirectory)
       meshes.clear()
       approachTracker.reset()
+      stationaryTracker.reset()
+      latestLightAnalysis = nil
+      if torchEnabledByController {
+        _ = setTorchLocked(enabled: false, level: 0)
+      }
       detectedFloorY = nil
       headingAligned = false
+    }
+  }
+
+  func setTorch(enabled: Bool, level: Double = 0.6) -> [String: Any] {
+    processingQueue.sync {
+      setTorchLocked(enabled: enabled, level: level)
+    }
+  }
+
+  private func setTorchLocked(enabled: Bool, level: Double) -> [String: Any] {
+    guard let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back),
+      device.hasTorch, device.isTorchAvailable else {
+      torchEnabledByController = false
+      return ["active": false]
+    }
+    do {
+      try device.lockForConfiguration()
+      defer { device.unlockForConfiguration() }
+      if enabled {
+        guard device.isTorchModeSupported(.on) else {
+          torchEnabledByController = false
+          return ["active": false]
+        }
+        let clamped = Float(max(0.05, min(1.0, level.isFinite ? level : 0.6)))
+        try device.setTorchModeOn(level: clamped)
+        let isOn = device.torchMode == .on
+        torchEnabledByController = isOn
+        return ["active": isOn]
+      } else {
+        device.torchMode = .off
+        torchEnabledByController = false
+        return ["active": false]
+      }
+    } catch {
+      torchEnabledByController = false
+      return ["active": false]
     }
   }
 
@@ -330,6 +382,7 @@ final class PerceptionController: NSObject, ARSessionDelegate {
     latestPeople = []
     latestAnimals = []
     approachTracker.reset()
+    stationaryTracker.reset()
     clearSeatTargets(result: result)
   }
 
@@ -468,10 +521,29 @@ final class PerceptionController: NSObject, ARSessionDelegate {
     if active && !isNormalTracking(camera.trackingState) { invalidateFrameContext(result: "tracking-lost") }
   }
 
+  private func updateThermalPolicy(for frame: ARFrame) -> ThermalPolicy {
+    let camPos = SIMD3<Float>(
+      frame.camera.transform.columns.3.x,
+      frame.camera.transform.columns.3.y,
+      frame.camera.transform.columns.3.z
+    )
+    let isStationary = isNormalTracking(frame.camera.trackingState)
+      ? stationaryTracker.observe(timestamp: frame.timestamp, position: camPos)
+      : false
+    let policy = ThermalGovernor.policy(
+      processThermalState: ProcessInfo.processInfo.thermalState,
+      isStationary: isStationary,
+      baseProximityIntervalMs: settings.proximityIntervalMs
+    )
+    latestThermalPolicy = policy
+    return policy
+  }
+
   private func process(frame: ARFrame, allowVision: Bool, force: Bool) {
     guard active else { return }
     let now = ProcessInfo.processInfo.systemUptime
-    guard force || (now - lastEmissionUptime) * 1000 >= settings.proximityIntervalMs else {
+    let thermalPolicy = updateThermalPolicy(for: frame)
+    guard force || (now - lastEmissionUptime) * 1000 >= thermalPolicy.proximityIntervalMs else {
       if allowVision { schedulePeople(frame) }
       return
     }
@@ -481,7 +553,9 @@ final class PerceptionController: NSObject, ARSessionDelegate {
     emit?("onSnapshot", snapshot)
     emit?("onStatus", status(snapshot))
     let snapshotAim = snapshot["aimState"] as? String ?? "level"
-    if snapshot["depthState"] as? String == "available", isNormalTracking(frame.camera.trackingState),
+    let snapshotDepthSource = snapshot["depthSource"] as? String ?? "unavailable"
+    let hasUsableDepth = snapshot["depthState"] as? String == "available" || snapshotDepthSource == "feature-points"
+    if hasUsableDepth, isNormalTracking(frame.camera.trackingState),
       snapshotAim != "lowered", snapshotAim != "covered" {
       let hazards = snapshot["hazards"] as? [[String: Any]] ?? []
       if let fastMover = hazards.first(where: { ($0["kind"] as? String) == "fast-mover" }) {
@@ -532,6 +606,19 @@ final class PerceptionController: NSObject, ARSessionDelegate {
             }
             emit?("onWarning", warning)
           }
+        } else if snapshotDepthSource == "feature-points",
+          let monocularObstacle = hazards.first(where: { ($0["kind"] as? String) == "obstacle" }),
+          let distance = monocularObstacle["distanceMeters"] as? Double,
+          distance <= settings.warningDistance {
+          emit?("onWarning", [
+            "id": monocularObstacle["id"] as? String ?? "monocular-corridor-obstacle",
+            "kind": "obstacle",
+            "timestampMs": frameClock.unixMilliseconds(for: frame.timestamp),
+            "severity": monocularObstacle["severity"] as? String == "urgent" ? "critical" : "warning",
+            "direction": ["bearing": monocularObstacle["direction"] as? String ?? "ahead", "yawDegrees": monocularObstacle["bearingDegrees"] as? Double ?? 0],
+            "distanceMeters": distance,
+            "message": monocularObstacle["message"] as? String ?? "Obstacle ahead."
+          ])
         }
       }
     }
@@ -571,6 +658,10 @@ final class PerceptionController: NSObject, ARSessionDelegate {
       "alignment": frame.sceneDepth == nil ? "unavailable" : (analysis.aligned ? "aligned" : "aspect-mismatch"),
       "fresh": !stale && depthState == "available", "issues": healthIssues
     ]
+    let thermalPolicy = updateThermalPolicy(for: frame)
+    if let light = LightAnalyzer.analyze(pixelBuffer: frame.capturedImage) {
+      latestLightAnalysis = light
+    }
     let freshGeometry = depthState == "available" && trackingReady
     var objects = freshGeometry ? meshes.objects(frame: frame, timestamp: cameraTimestamp, orientation: imageOrientation, settings: settings) : []
     let visionAge = lastPersonScanFrameTime.map { frame.timestamp - $0 }
@@ -578,10 +669,38 @@ final class PerceptionController: NSObject, ARSessionDelegate {
     let visionDepthFresh = visionAge.map { (0...0.85).contains($0) } ?? false
     let people = peopleAreCurrent ? latestPeople : []
     let animals = peopleAreCurrent ? latestAnimals : []
+    let verticalFocalNorm = MonocularDepthFallback.verticalFocalNormalized(
+      intrinsics: frame.camera.intrinsics,
+      imageSize: frame.camera.imageResolution,
+      orientation: imageOrientation
+    )
+    var monocularDetections: [MonocularVisualDetection] = []
     if !stale && trackingReady {
       for entity in people + animals {
         if freshGeometry && (lastPersonScanFrameTime == frame.timestamp || visionDepthFresh) {
           objects.append(entity)
+        } else if frame.sceneDepth == nil {
+          var copy = entity
+          for key in ["distanceMeters", "robustDistanceMeters", "steps", "nearestPoint", "depthTimestampMs"] { copy.removeValue(forKey: key) }
+          if let label = entity["label"] as? String,
+            let bounds = entity["bounds"] as? [String: Double],
+            let span = MonocularDepthFallback.verticalSpanFraction(sensorBounds: bounds, orientation: imageOrientation),
+            let estDist = MonocularDepthFallback.estimateDistanceMeters(label: label, verticalSpanFraction: span, verticalFocalNormalized: verticalFocalNorm) {
+            copy["distanceMeters"] = estDist
+            copy["robustDistanceMeters"] = estDist
+            if let steps = Geometry.steps(estDist, settings: settings) { copy["steps"] = steps }
+            let yaw = (entity["direction"] as? [String: Any])?["yawDegrees"] as? Double ?? 0
+            let confidence = entity["confidence"] as? Double ?? 0.6
+            monocularDetections.append(MonocularVisualDetection(
+              label: label,
+              bearingDegrees: yaw,
+              verticalSpanFraction: span,
+              confidence: confidence
+            ))
+          } else {
+            copy.removeValue(forKey: "direction")
+          }
+          objects.append(copy)
         } else {
           var copy = entity
           for key in ["distanceMeters", "robustDistanceMeters", "steps", "nearestPoint", "depthTimestampMs", "direction"] { copy.removeValue(forKey: key) }
@@ -597,8 +716,9 @@ final class PerceptionController: NSObject, ARSessionDelegate {
     let seats = sameFramePersonScan ? seatCandidates(objects: objects, people: people, frame: frame) : []
     var corridorDict: [String: Any]?
     var hazardsList: [[String: Any]] = []
+    var depthSource = "unavailable"
     let pitchDegrees = CorridorAnalyzer.cameraPitchDegrees(transform: frame.camera.transform)
-    var aimState = CorridorAnalyzer.aimState(pitchDegrees: pitchDegrees)
+    var aimState = CorridorAnalyzer.aimState(pitchDegrees: pitchDegrees, mountMode: settings.mountMode)
     let headingDegrees = headingAligned && trackingReady ? CorridorAnalyzer.cameraHeadingDegrees(transform: frame.camera.transform) : nil
     if freshGeometry, let depth = frame.sceneDepth,
       let map = DepthMap(depth: depth.depthMap, confidence: depth.confidenceMap, imageSize: frame.camera.imageResolution),
@@ -611,9 +731,11 @@ final class PerceptionController: NSObject, ARSessionDelegate {
           headingAligned: self.headingAligned,
           knownFloorY: self.detectedFloorY,
           warningDistance: self.settings.warningDistance,
-          criticalDistance: self.settings.criticalDistance
+          criticalDistance: self.settings.criticalDistance,
+          mountMode: self.settings.mountMode
         )
       }) {
+      depthSource = "lidar"
       let approach = approachTracker.update(
         timestamp: frame.timestamp,
         cameraTransform: frame.camera.transform,
@@ -624,6 +746,26 @@ final class PerceptionController: NSObject, ARSessionDelegate {
       aimState = corridor.aimState
       corridorDict = corridor.toDictionary()
       hazardsList = corridor.hazardDictionaries(timestampMs: cameraTimestamp)
+    } else if !stale && trackingReady && frame.sceneDepth == nil && aimState != "lowered" {
+      let rawPoints = frame.rawFeaturePoints?.points ?? []
+      let fallbackCorridor = MonocularDepthFallback.analyze(
+        featurePoints: rawPoints,
+        visualDetections: monocularDetections,
+        cameraTransform: frame.camera.transform,
+        headingAligned: headingAligned,
+        knownFloorY: detectedFloorY,
+        warningDistance: settings.warningDistance,
+        criticalDistance: settings.criticalDistance,
+        mountMode: settings.mountMode,
+        verticalFocalNormalized: verticalFocalNorm
+      )
+      approachTracker.reset()
+      if fallbackCorridor.valid {
+        depthSource = "feature-points"
+        aimState = fallbackCorridor.aimState
+        corridorDict = fallbackCorridor.toDictionary()
+        hazardsList = fallbackCorridor.hazardDictionaries(timestampMs: cameraTimestamp)
+      }
     } else if aimState == "lowered" || !freshGeometry {
       approachTracker.reset()
     }
@@ -634,11 +776,18 @@ final class PerceptionController: NSObject, ARSessionDelegate {
       "capturedAtMs": Date().timeIntervalSince1970 * 1000,
       "trackingState": tracking(frame.camera.trackingState),
       "trackingReason": Geometry.nullable(trackingReason(frame.camera.trackingState)),
-      "depthState": depthState, "confidence": freshGeometry ? analysis.confidence : 0,
+      "depthState": depthState, "depthSource": depthSource,
+      "thermalState": thermalPolicy.thermalState,
+      "proactiveVlmAllowed": thermalPolicy.proactiveVlmAllowed,
+      "confidence": freshGeometry ? analysis.confidence : 0,
       "sensorHealth": sensorHealth, "obstacles": freshGeometry ? analysis.obstacles : [],
       "objects": objects, "freeSeats": seats, "ocr": validOCR,
       "aimState": aimState, "pitchDegrees": pitchDegrees, "hazards": hazardsList
     ]
+    if let light = latestLightAnalysis {
+      snapshot["lightingState"] = light.lightingState
+      snapshot["ambientLuma"] = light.ambientLuma
+    }
     if let headingDegrees { snapshot["headingDegrees"] = headingDegrees }
     if let corridorDict { snapshot["corridor"] = corridorDict }
     if let image { snapshot["image"] = image }
@@ -700,9 +849,9 @@ final class PerceptionController: NSObject, ARSessionDelegate {
   private func schedulePeople(_ frame: ARFrame) {
     guard settings.detectPeople, !personTaskRunning, isNormalTracking(frame.camera.trackingState) else { return }
     let pitch = CorridorAnalyzer.cameraPitchDegrees(transform: frame.camera.transform)
-    guard pitch >= -58.0 else { return }
+    guard CorridorAnalyzer.aimState(pitchDegrees: pitch, mountMode: settings.mountMode) != "lowered" else { return }
     let now = ProcessInfo.processInfo.systemUptime
-    guard now - lastPersonRequestUptime >= 0.55 else { return }
+    guard now - lastPersonRequestUptime >= latestThermalPolicy.visionIntervalSec else { return }
     lastPersonRequestUptime = now
     personTaskRunning = true
     let generation = captureGeneration

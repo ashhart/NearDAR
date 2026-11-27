@@ -29,13 +29,31 @@ export const defaultSettings: GuidanceSettings = {
   directionStyle: 'natural',
   oledHighContrast: false,
   warningDistanceMeters: 2.2,
+  mobilityProfile: 'standard',
+  distanceUnit: 'metric',
+  mountMode: 'handheld',
+  screenCurtain: false,
+  backgroundSatnav: true,
+  autoTorch: false,
+  emergencyContactName: '',
+  emergencyContactPhone: '',
 }
 
 export function normalizeCompanionName(value: string): string {
   return Array.from(value.replace(/\s+/g, ' ').trim()).slice(0, 40).join('')
 }
 
-function validSettings(value: unknown): GuidanceSettings {
+export function normalizeEmergencyContactPhone(value: string): string {
+  const cleaned = value.replace(/[^0-9+\-\s]/g, '').replace(/\s+/g, ' ').trim()
+  if (!cleaned) return ''
+  const hasLeadingPlus = cleaned.startsWith('+')
+  const body = cleaned.replace(/\+/g, '').trim()
+  if (!/[0-9]/.test(body)) return ''
+  const combined = hasLeadingPlus ? `+${body}` : body
+  return Array.from(combined).slice(0, 24).join('').trim()
+}
+
+export function validSettings(value: unknown): GuidanceSettings {
   if (!value || typeof value !== 'object') return defaultSettings
   const stored = value as Partial<GuidanceSettings>
   return {
@@ -57,6 +75,19 @@ function validSettings(value: unknown): GuidanceSettings {
     directionStyle: stored.directionStyle === 'clock' ? 'clock' : 'natural',
     oledHighContrast: stored.oledHighContrast === true,
     warningDistanceMeters: typeof stored.warningDistanceMeters === 'number' && stored.warningDistanceMeters >= 1.2 && stored.warningDistanceMeters <= 3.5 ? stored.warningDistanceMeters : 2.2,
+    mobilityProfile:
+      stored.mobilityProfile === 'cane' ||
+      stored.mobilityProfile === 'guide-dog' ||
+      stored.mobilityProfile === 'low-vision'
+        ? stored.mobilityProfile
+        : 'standard',
+    distanceUnit: stored.distanceUnit === 'imperial' ? 'imperial' : 'metric',
+    mountMode: stored.mountMode === 'lanyard' ? 'lanyard' : 'handheld',
+    screenCurtain: stored.screenCurtain === true,
+    backgroundSatnav: stored.backgroundSatnav !== false,
+    autoTorch: stored.autoTorch === true,
+    emergencyContactName: typeof stored.emergencyContactName === 'string' ? normalizeCompanionName(stored.emergencyContactName) : '',
+    emergencyContactPhone: typeof stored.emergencyContactPhone === 'string' ? normalizeEmergencyContactPhone(stored.emergencyContactPhone) : '',
   }
 }
 

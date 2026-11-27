@@ -11,7 +11,8 @@ data class SessionSettings(
   val proximityIntervalMs: Long,
   val detectPeople: Boolean,
   val recognizeText: Boolean,
-  val ocrLanguages: List<String>
+  val ocrLanguages: List<String>,
+  val mountMode: String = "handheld"
 ) {
   companion object {
     fun parse(values: Map<String, Any?>?): SessionSettings {
@@ -24,7 +25,11 @@ data class SessionSettings(
       val critical = number("criticalDistanceMeters") ?: 0.9
       val frameAge = number("maximumFrameAgeMs") ?: 500.0
       val alignmentAge = number("maximumAlignmentAgeMs") ?: 80.0
-      val interval = number("proximityIntervalMs")?.toLong() ?: 250L
+      val interval = number("proximityIntervalMs")?.toLong() ?: 120L
+      val mountMode = (values?.get("mountMode") as? String) ?: "handheld"
+      if (mountMode != "handheld" && mountMode != "lanyard") {
+        throw PerceptionException("E_OPTIONS", "mountMode must be 'handheld' or 'lanyard'.")
+      }
       if (warning <= critical || critical <= 0 || frameAge < 100 || alignmentAge < 0 || interval < 100) {
         throw PerceptionException("E_OPTIONS", "Invalid distance, freshness, or proximity interval settings.")
       }
@@ -34,7 +39,8 @@ data class SessionSettings(
         step, warning, critical, frameAge, alignmentAge, interval,
         values?.get("detectPeople") as? Boolean ?: true,
         values?.get("recognizeText") as? Boolean ?: true,
-        languages
+        languages,
+        mountMode
       )
     }
   }

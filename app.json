@@ -14,6 +14,8 @@
         "NSCameraUsageDescription": "Identify nearby objects, obstacles, seats, and text. Images are processed on this device.",
         "NSMicrophoneUsageDescription": "Hear your questions through the phone microphone or a connected headset. Audio stays on this device.",
         "NSSpeechRecognitionUsageDescription": "Convert your spoken questions into text on this device.",
+        "NSLocationAlwaysAndWhenInUseUsageDescription": "Allow NearDar to keep spoken walking directions and 3D audio beacons running while your phone is locked in your pocket.",
+        "UIBackgroundModes": ["location", "audio"],
         "ITSAppUsesNonExemptEncryption": false
       }
     },
@@ -41,7 +43,8 @@
         {
           "locationWhenInUsePermission": "Let NearDar guide you with turn-by-turn walking directions, compass orientation, and offline saved places.",
           "locationAlwaysPermission": false,
-          "locationAlwaysAndWhenInUsePermission": false
+          "locationAlwaysAndWhenInUsePermission": "Allow NearDar to keep spoken walking directions and 3D audio beacons running while your phone is locked in your pocket.",
+          "isIosBackgroundLocationEnabled": true
         }
       ],
       [

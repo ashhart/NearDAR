@@ -3,6 +3,12 @@ import type { RouteProgress } from '../navigation/tracker'
 import { cardinalDirection, formatWalkingDistance, turnPhraseFromOffset } from '../navigation/geo'
 import { formatDirectionLabel } from './arbitrator'
 
+export type LightingState = 'good' | 'dim' | 'dark'
+export type MobilityProfile = 'standard' | 'cane' | 'guide-dog' | 'low-vision'
+
+export const DARK_LIGHTING_TELEMETRY_NOTE =
+  'Camera view is very dark; rely on LiDAR depth and do not guess unlit objects.'
+
 export interface ConversationTurn {
   role: 'user' | 'assistant'
   text: string
@@ -15,10 +21,22 @@ export interface VisionPromptContext {
   headingDeg?: number
   stepLengthMeters?: number
   directionStyle?: DirectionStyle
+  lightingState?: LightingState
+  proactiveVlmAllowed?: boolean
+  mobilityProfile?: MobilityProfile
   history: ConversationTurn[]
 }
 
-const UNSAFE_GUARANTEE = /\b(it is safe to cross|safe to cross|clear to cross|you can safely cross|guaranteed clear|completely safe to walk|100% clear|go ahead and cross)\b/gi
+const UNSAFE_GUARANTEE =
+  /\b(it(?:'s| is) safe to cross|you can safely cross|you may safely cross|all clear to cross|safe to step into the (?:road|street)|go ahead and cross|feel free to cross|safe to cross|clear to cross|okay to cross|ok to cross|guaranteed clear|completely safe to walk|100% clear)\b/gi
+
+export function resolveLightingState(
+  explicit?: LightingState,
+  snapshot?: SceneSnapshot,
+): LightingState | undefined {
+  if (explicit) return explicit
+  return (snapshot as { lightingState?: LightingState } | undefined)?.lightingState
+}
 
 /** Keeps rich natural descriptions while softening reckless traffic/crossing guarantees. */
 export function sanitizeSpokenVisionOutput(raw: string): string {
@@ -38,18 +56,34 @@ export const SATNAV_SYSTEM_PROMPT =
   'Use clear directions (ahead, ahead left, ahead right, or clock-face when requested) and measured distances when supplied. ' +
   'Never claim a road or crossing is safe to cross, and be honest when something is unclear.'
 
-export function buildSatnavSystemPrompt(directionStyle: DirectionStyle = 'natural'): string {
+export function buildSatnavSystemPrompt(
+  directionStyle: DirectionStyle = 'natural',
+  mobilityProfile?: MobilityProfile,
+): string {
+  const parts = [SATNAV_SYSTEM_PROMPT]
   if (directionStyle === 'clock') {
-    return (
-      `${SATNAV_SYSTEM_PROMPT} ` +
-      'The user prefers clock-face directions (12 o\'clock for straight ahead, 11 o\'clock ahead-left, 1 o\'clock ahead-right, 9 o\'clock left, 3 o\'clock right).'
+    parts.push(
+      'The user prefers clock-face directions (12 o\'clock for straight ahead, 11 o\'clock ahead-left, 1 o\'clock ahead-right, 9 o\'clock left, 3 o\'clock right).',
     )
   }
-  return SATNAV_SYSTEM_PROMPT
+  if (mobilityProfile === 'cane') {
+    parts.push(
+      'The user walks with a white cane that sweeps low ground obstacles; prioritize head-height hazards, drop-offs, doorways, crossings, landmarks, and approaching movers.',
+    )
+  } else if (mobilityProfile === 'guide-dog') {
+    parts.push(
+      'The user walks with a guide dog that routes around static obstacles; prioritize doorways, crossings, signs, transit, head-height hazards, and approaching movers.',
+    )
+  } else if (mobilityProfile === 'low-vision') {
+    parts.push(
+      'The user has low vision; emphasize kerbs, steps, high-contrast layout edges, doorways, and readable signage concisely.',
+    )
+  }
+  return parts.join(' ')
 }
 
-/** Builds the compact user prompt with live LiDAR, OCR, heading, route, and recent turn context. */
-export function buildSatnavUserPrompt(question: string, ctx: VisionPromptContext): string {
+/** Builds compact live telemetry strings shared by standard satnav and specialized street modes. */
+export function buildTelemetryContextLines(ctx: VisionPromptContext): string[] {
   const telemetry: string[] = []
   const style = ctx.directionStyle ?? 'natural'
 
@@ -104,6 +138,28 @@ export function buildSatnavUserPrompt(question: string, ctx: VisionPromptContext
     telemetry.push(`Visible text: "${ocr.join(' | ').slice(0, 180)}".`)
   }
 
+  const lighting = resolveLightingState(ctx.lightingState, ctx.snapshot)
+  if (lighting === 'dark') {
+    telemetry.push(DARK_LIGHTING_TELEMETRY_NOTE)
+  } else if (lighting === 'dim') {
+    telemetry.push('Lighting is dim; rely on LiDAR for distances and avoid guessing faint unlit details.')
+  }
+
+  if (ctx.mobilityProfile === 'guide-dog') {
+    telemetry.push('Mobility profile: guide dog handler (prioritize crossings, doorways, signs, transit, and fast movers).')
+  } else if (ctx.mobilityProfile === 'cane') {
+    telemetry.push('Mobility profile: white cane user (prioritize head-height hazards, drop-offs, doorways, crossings, and landmarks).')
+  } else if (ctx.mobilityProfile === 'low-vision') {
+    telemetry.push('Mobility profile: low vision (prioritize kerbs, steps, doorways, and signs).')
+  }
+
+  return telemetry
+}
+
+/** Builds the compact user prompt with live LiDAR, OCR, heading, route, and recent turn context. */
+export function buildSatnavUserPrompt(question: string, ctx: VisionPromptContext): string {
+  const telemetry = buildTelemetryContextLines(ctx)
+
   const recentTurns = ctx.history.slice(-4)
   const historyBlock = recentTurns.length > 0
     ? `\nRecent conversation:\n${recentTurns.map((t) => `${t.role === 'user' ? 'User' : 'NearDar'}: ${t.text}`).join('\n')}`
@@ -115,7 +171,7 @@ export function buildSatnavUserPrompt(question: string, ctx: VisionPromptContext
 
 /** Builds a combined single-string prompt for backends without a separate system channel. */
 export function buildConversationalVisionPrompt(question: string, ctx: VisionPromptContext): string {
-  return `${buildSatnavSystemPrompt(ctx.directionStyle)}\n\n${buildSatnavUserPrompt(question, ctx)}\nSpoken reply:`
+  return `${buildSatnavSystemPrompt(ctx.directionStyle, ctx.mobilityProfile)}\n\n${buildSatnavUserPrompt(question, ctx)}\nSpoken reply:`
 }
 
 export function buildAmbientObstaclePrompt(direction: string, distanceMeters: number): string {
@@ -229,6 +285,10 @@ export function buildFastCorridorReply(
       .map((o) => `${o.label} ${formatDirectionLabel(o.direction, directionStyle, undefined, o.clockSector)} at ${formatWalkingDistance(o.distanceMeters!, stepLengthMeters)}`)
       .join(', ')
     parts.push(`Nearby: ${desc}.`)
+  }
+
+  if (resolveLightingState(undefined, snapshot) === 'dark') {
+    parts.push('Camera view is very dark; LiDAR depth is still active.')
   }
 
   if (route?.active && route.headingOffsetDeg !== undefined) {

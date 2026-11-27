@@ -1,9 +1,9 @@
 import { StyleSheet, Text, View } from 'react-native'
 import type { FusedSatnavGuidance } from '../lib/navigation/fusion'
 import type { CorridorSummary } from '../../modules/tensorfold-perception/src'
-import type { SceneSnapshot } from '../lib/guidance/types'
+import type { DistanceUnit, SceneSnapshot } from '../lib/guidance/types'
 import { cardinalDirection, turnPhraseFromOffset } from '../lib/navigation/geo'
-import { extractLiveEntityChips } from '../lib/satnav/arbitrator'
+import { extractLiveEntityChips, formatShortDistance } from '../lib/satnav/arbitrator'
 import { Icon, useColors } from './ui'
 
 interface Props {
@@ -11,6 +11,7 @@ interface Props {
   snapshot?: SceneSnapshot
   fused: FusedSatnavGuidance
   headingDegrees?: number
+  distanceUnit?: DistanceUnit
   active: boolean
 }
 
@@ -22,7 +23,7 @@ function sectorColor(clearance: number, isRecommended: boolean): string {
   return isRecommended ? '#10B981' : '#38BDF8'
 }
 
-export function RadarHud({ corridor, snapshot, fused, headingDegrees, active }: Props) {
+export function RadarHud({ corridor, snapshot, fused, headingDegrees, distanceUnit = 'metric', active }: Props) {
   const colors = useColors()
   const sectors = !fused.standby && corridor?.valid && corridor.sectors.length === 7
     ? corridor.sectors
@@ -35,7 +36,22 @@ export function RadarHud({ corridor, snapshot, fused, headingDegrees, active }: 
         confidence: 0,
       }))
 
-  const entityChips = extractLiveEntityChips(snapshot)
+  const baseChips = extractLiveEntityChips(snapshot, distanceUnit)
+  const extraChips: typeof baseChips = []
+  if (snapshot?.lightingState === 'dark') {
+    extraChips.push({
+      id: 'dark-light',
+      label: snapshot.depthSource === 'lidar' ? 'Dark · LiDAR OK' : 'Low light',
+      tone: 'warn',
+    })
+  }
+  if (snapshot?.thermalState === 'serious' || snapshot?.thermalState === 'critical') {
+    extraChips.push({ id: 'thermal', label: 'Cooling', tone: 'warn' })
+  }
+  if (snapshot?.depthSource === 'feature-points') {
+    extraChips.push({ id: 'depth-fallback', label: 'Camera depth', tone: 'accent' })
+  }
+  const entityChips = [...baseChips, ...extraChips].slice(0, 4)
   const offset = fused.steeringOffsetDeg
   const steerLabel = fused.standby
     ? (fused.aimState === 'covered' ? 'CAMERA COVERED' : 'STANDBY · ROUTE ACTIVE')
@@ -81,8 +97,8 @@ export function RadarHud({ corridor, snapshot, fused, headingDegrees, active }: 
     ? 'Compass & GPS on'
     : fused.forwardClearanceMeters !== undefined
       ? fused.forwardClearanceMeters >= 4.5
-        ? '4.5m+ ahead'
-        : `${fused.forwardClearanceMeters.toFixed(1)}m ahead`
+        ? (distanceUnit === 'imperial' ? '15ft+ ahead' : '4.5m+ ahead')
+        : `${formatShortDistance(fused.forwardClearanceMeters, distanceUnit)} ahead`
       : 'Depth warming…'
 
   const compassText = headingDegrees !== undefined

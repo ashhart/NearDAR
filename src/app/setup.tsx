@@ -6,6 +6,7 @@ import { VisionModelCard } from '../components/VisionModelCard'
 import * as Voice from '../../modules/tensorfold-voice/src'
 import { useAppSettings } from '../lib/SettingsContext'
 import { useSatnav } from '../lib/satnav/useSatnav'
+import { MOBILITY_PROFILES, MOBILITY_PROFILE_ORDER } from '../lib/satnav/profiles'
 
 export default function Setup() {
   const { settings, update } = useAppSettings()
@@ -75,6 +76,22 @@ export default function Setup() {
       </View>
 
       <VisionModelCard onReady={() => void finish()} />
+
+      <StatusCard title="Choose your mobility profile">
+        <Body muted>{MOBILITY_PROFILES[settings.mobilityProfile].shortDescription}</Body>
+        <View style={styles.cues}>
+          {MOBILITY_PROFILE_ORDER.map((profile) => (
+            <Button
+              key={profile}
+              compact
+              secondary={settings.mobilityProfile !== profile}
+              selected={settings.mobilityProfile === profile}
+              label={MOBILITY_PROFILES[profile].label}
+              onPress={() => void satnav.applyMobilityProfile(profile)}
+            />
+          ))}
+        </View>
+      </StatusCard>
 
       <StatusCard title="Feel the satnav cues">
         <Body muted>Test how NearDar feels in your hand and sounds in headphones before walking.</Body>

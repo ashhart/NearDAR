@@ -79,6 +79,9 @@ enum PerceptionContract {
     if native["source"] as? String == "arcore" {
       notes.append("Named chair and person detection is unavailable in this ARCore adapter. Generic depth obstacles and captured image evidence remain available.")
     }
+    if native["lightingState"] as? String == "dark" {
+      notes.append("Camera view is dark; LiDAR depth remains active in zero light.")
+    }
     let nativeOCR = native["ocr"] as? [[String: Any]] ?? []
     let textObservations = nativeOCR.compactMap { observation -> [String: String]? in
       guard let text = observation["text"] as? String, !text.isEmpty else { return nil }
@@ -112,6 +115,21 @@ enum PerceptionContract {
     }
     if let pitchDegrees = native["pitchDegrees"] as? Double {
       result["pitchDegrees"] = pitchDegrees
+    }
+    if let depthSource = native["depthSource"] as? String {
+      result["depthSource"] = depthSource
+    }
+    if let thermalState = native["thermalState"] as? String {
+      result["thermalState"] = thermalState
+    }
+    if let proactiveVlmAllowed = native["proactiveVlmAllowed"] as? Bool {
+      result["proactiveVlmAllowed"] = proactiveVlmAllowed
+    }
+    if let lightingState = native["lightingState"] as? String {
+      result["lightingState"] = lightingState
+    }
+    if let ambientLuma = native["ambientLuma"] as? Double {
+      result["ambientLuma"] = ambientLuma
     }
     return result
   }

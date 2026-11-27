@@ -1,5 +1,6 @@
 package expo.modules.tensorfoldperception
 
+import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.max
@@ -86,6 +87,18 @@ object PerceptionContract {
     (image?.get("uri") as? String)?.let { result["temporaryImagePath"] = it }
     image?.get("width")?.let { result["imageWidth"] = it }
     image?.get("height")?.let { result["imageHeight"] = it }
+    asMap(native["corridor"])?.let { result["corridor"] = it }
+    if (native["hazards"] is List<*>) {
+      result["hazards"] = mapList(native["hazards"])
+    }
+    number(native["headingDegrees"])?.let { result["headingDegrees"] = it }
+    (native["aimState"] as? String)?.let { result["aimState"] = it }
+    number(native["pitchDegrees"])?.let { result["pitchDegrees"] = it }
+    (native["depthSource"] as? String)?.let { result["depthSource"] = it }
+    (native["thermalState"] as? String)?.let { result["thermalState"] = it }
+    (native["proactiveVlmAllowed"] as? Boolean)?.let { result["proactiveVlmAllowed"] = it }
+    (native["lightingState"] as? String)?.let { result["lightingState"] = it }
+    number(native["ambientLuma"])?.let { result["ambientLuma"] = it }
     return result
   }
 
@@ -93,19 +106,34 @@ object PerceptionContract {
     val obstacle = asMap(native["obstacle"]) ?: emptyMap()
     val heading = direction(asMap(native["direction"]))
     val distance = number(native["distanceMeters"])
+    val kind = native["kind"] as? String ?: "obstacle"
     val calibratedSteps = stepCount(obstacle)
     val measurement = when {
       calibratedSteps != null -> "about ${calibratedSteps.roundToInt()} calibrated steps"
-      distance != null -> "about ${String.format("%.1f", max(0.1, distance))} metres"
+      distance != null -> "about ${String.format(Locale.US, "%.1f", max(0.1, distance))} metres"
       else -> "distance unavailable"
     }
-    return mapOf(
-      "id" to "${native["snapshotId"] as? String ?: UUID.randomUUID().toString()}-${native["sector"] as? String ?: "obstacle"}",
-      "kind" to "obstacle", "severity" to (if (native["severity"] == "critical") "urgent" else "caution"),
-      "message" to "Obstacle ${heading.replace('-', ' ')}, $measurement.",
+    val label = native["label"] as? String
+    val name = label?.replaceFirstChar { if (it.isLowerCase()) it.titlecase(Locale.US) else it.toString() } ?: "Obstacle"
+    val defaultMessage = "$name ${heading.replace('-', ' ')}, $measurement."
+    val severityRaw = native["severity"] as? String
+    val severity = if (severityRaw == "critical" || severityRaw == "urgent") "urgent" else "caution"
+    val id = native["id"] as? String
+      ?: "${native["snapshotId"] as? String ?: UUID.randomUUID().toString()}-${native["sector"] as? String ?: "obstacle"}"
+    val result = mutableMapOf<String, Any?>(
+      "id" to id,
+      "kind" to kind,
+      "severity" to severity,
+      "message" to (native["message"] as? String ?: defaultMessage),
       "observedAt" to (number(native["timestampMs"]) ?: System.currentTimeMillis().toDouble()),
-      "distanceMeters" to distance, "direction" to heading
+      "direction" to heading
     )
+    distance?.let { result["distanceMeters"] = it }
+    label?.let { result["label"] = it }
+    number(native["closingSpeedMps"])?.let { result["closingSpeedMps"] = it }
+    number(native["externalSpeedMps"])?.let { result["externalSpeedMps"] = it }
+    number(native["ttcSeconds"])?.let { result["ttcSeconds"] = it }
+    return result
   }
 
   fun statusMessage(status: Map<String, Any?>): String? {

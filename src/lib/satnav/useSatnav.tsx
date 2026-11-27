@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react'
-import { AccessibilityInfo, Platform } from 'react-native'
+import { AccessibilityInfo, Linking, Platform, Share } from 'react-native'
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake'
 import * as Perception from '../../../modules/tensorfold-perception/src'
 import * as Voice from '../../../modules/tensorfold-voice/src'
@@ -29,6 +29,13 @@ import {
   savePlace,
   type SavedPlace,
 } from '../navigation/store'
+import {
+  computeIndoorGuidance,
+  findIndoorAnchorByLabel,
+  loadIndoorAnchors,
+  saveIndoorAnchor,
+  type IndoorAnchor,
+} from '../navigation/indoor'
 import { WalkingRouteTracker, type RouteProgress } from '../navigation/tracker'
 import { fuseSatnavGuidance, type FusedSatnavGuidance } from '../navigation/fusion'
 import { parseSatnavIntent } from './intents'
@@ -42,6 +49,28 @@ import {
 } from './arbitrator'
 import { formatNarrationOutput, StreetNarrator, type NarrationTask } from './narrator'
 import {
+  applyProfilePatch,
+  MOBILITY_PROFILES,
+  shouldAnnounceHazardForProfile,
+  shouldAnnouncePresenceForProfile,
+} from './profiles'
+import {
+  buildEmergencyCallUrl,
+  buildEmergencySmsUrl,
+  buildLocationShareMessage,
+} from './emergency'
+import {
+  buildMobilitySkillPrompt,
+  formatBusMatchAnnouncement,
+  formatDoorFinderSuggestion,
+  formatDoorTelemetryFallback,
+  formatMobilitySkillOutput,
+  matchWatchedBusNumber,
+  normalizeBusNumber,
+  shouldAutoSuggestDoorFinder,
+  type ActiveMobilitySkill,
+} from './modes'
+import {
   buildConversationalVisionPrompt,
   buildFastCorridorReply,
   buildSatnavSystemPrompt,
@@ -51,12 +80,16 @@ import {
   type ConversationTurn,
 } from './prompts'
 import type {
+  DepthSource,
   EngineCapabilities,
   EngineStatus,
+  LightingState,
+  MobilityProfile,
   SatnavMode,
   SceneSnapshot,
   SceneWarning,
   SessionState,
+  ThermalState,
   VoiceCapabilities,
 } from '../guidance/types'
 
@@ -99,6 +132,14 @@ export interface SatnavController {
   usingTensorFoldEngine: boolean
   voice?: VoiceCapabilities
   mode: SatnavMode
+  activeSkill: ActiveMobilitySkill
+  watchedBus?: string
+  torchEnabled: boolean
+  thermalState: ThermalState
+  lightingState: LightingState
+  depthSource: DepthSource
+  pocketBackgroundActive: boolean
+  indoorAnchors: IndoorAnchor[]
 
   start(): Promise<void>
   pause(silent?: boolean): Promise<void>
@@ -107,6 +148,13 @@ export interface SatnavController {
   endTalk(): Promise<void>
   quickScanAhead(): Promise<void>
   orientMe(includeVision?: boolean): Promise<void>
+  runSkill(skill: Exclude<ActiveMobilitySkill, 'none'>, target?: string): Promise<void>
+  clearSkill(): void
+  toggleTorch(enabled?: boolean): Promise<void>
+  toggleScreenCurtain(enabled?: boolean): Promise<void>
+  applyMobilityProfile(profile: MobilityProfile): Promise<void>
+  shareLocationWithContact(): Promise<void>
+  callEmergencyContact(): Promise<void>
   submitCommand(text: string): Promise<void>
   cancelSpeech(): Promise<void>
   cycleMode(direction?: 1 | -1): Promise<void>
@@ -160,8 +208,16 @@ export function SatnavProvider({ children }: { children: ReactNode }) {
   const [lastReply, setLastReply] = useState<SatnavReply>()
   const [savedPlaces, setSavedPlaces] = useState<SavedPlace[]>([])
   const [cachedRoutes, setCachedRoutes] = useState<Nav.WalkingRoute[]>([])
+  const [indoorAnchors, setIndoorAnchors] = useState<IndoorAnchor[]>([])
   const [breadcrumbCount, setBreadcrumbCount] = useState(0)
   const [voice, setVoice] = useState<VoiceCapabilities>()
+  const [activeSkill, setActiveSkill] = useState<ActiveMobilitySkill>('none')
+  const [watchedBus, setWatchedBus] = useState<string | undefined>()
+  const [torchEnabled, setTorchEnabled] = useState(false)
+  const [thermalState, setThermalState] = useState<ThermalState>('nominal')
+  const [lightingState, setLightingState] = useState<LightingState>('good')
+  const [depthSource, setDepthSource] = useState<DepthSource>('unavailable')
+  const [pocketBackgroundActive, setPocketBackgroundActive] = useState(false)
 
   const settingsRef = useRef(settings)
   settingsRef.current = settings
@@ -206,6 +262,19 @@ export function SatnavProvider({ children }: { children: ReactNode }) {
   const thinkingTickTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const partialRef = useRef('')
   const handleTranscriptRef = useRef<(text: string) => Promise<void>>(async () => {})
+  const beginTalkRef = useRef<() => Promise<void>>(async () => {})
+  const quickScanRef = useRef<() => Promise<void>>(async () => {})
+  const orientMeRef = useRef<(includeVision?: boolean) => Promise<void>>(async () => {})
+  const watchedBusRef = useRef<string | undefined>(undefined)
+  watchedBusRef.current = watchedBus
+  const lastBusSpotAtRef = useRef(0)
+  const lastDarkNoticeAtRef = useRef(0)
+  const doorSuggestedRouteIdRef = useRef<string | undefined>(undefined)
+  const pocketBgRef = useRef(false)
+  const torchEnabledRef = useRef(false)
+  torchEnabledRef.current = torchEnabled
+  const indoorAnchorsRef = useRef<IndoorAnchor[]>([])
+  indoorAnchorsRef.current = indoorAnchors
 
   const active = state === 'active' || state === 'degraded'
   const paused = state === 'paused' || state === 'idle'
@@ -459,6 +528,29 @@ export function SatnavProvider({ children }: { children: ReactNode }) {
     routeProgressRef.current = progress
     setRouteProgress(progress)
 
+    // Update Lock Screen / Now Playing status for pocket satnav
+    const distUnit = settingsRef.current.distanceUnit
+    const remText = formatWalkingDistance(progress.remainingDistanceMeters, settingsRef.current.stepLengthMeters, distUnit)
+    void Voice.updateNowPlaying(
+      `NearDar · ${progress.route.destinationName}`,
+      `${remText} left · ${progress.currentStep.instruction}`,
+    ).catch(() => {})
+
+    // Auto-suggest Door Finder in the last 25 metres once per route
+    if (
+      doorSuggestedRouteIdRef.current !== progress.route.id &&
+      shouldAutoSuggestDoorFinder(progress, snapshotRef.current) &&
+      settingsRef.current.guidanceMode !== 'quiet'
+    ) {
+      doorSuggestedRouteIdRef.current = progress.route.id
+      const suggestion = formatDoorFinderSuggestion(
+        progress.route.destinationName,
+        progress.remainingDistanceMeters,
+        settingsRef.current.stepLengthMeters,
+      )
+      void speak(suggestion, { tier: 'navigation', category: 'door-suggest', cooldownMs: 30_000, record: true })
+    }
+
     const ann = progress.announcement
     if (ann) {
       const hapticMap: Partial<Record<typeof ann.kind, Haptics.HapticCue>> = {
@@ -690,11 +782,15 @@ export function SatnavProvider({ children }: { children: ReactNode }) {
     const aim = snapshotRef.current?.aimState
     if (aim === 'lowered' || aim === 'covered') return
     if (!warningIsCurrent(warning)) return
+    if (!shouldAnnounceHazardForProfile(warning.kind, warning.severity, warning.distanceMeters, settingsRef.current.mobilityProfile)) {
+      return
+    }
     if (!warningGateRef.current.accept(warning)) return
 
     const bearing = directionToBearing(warning.direction ?? 'ahead')
     const style = settingsRef.current.directionStyle
     const stepLen = settingsRef.current.stepLengthMeters
+    const unit = settingsRef.current.distanceUnit
     const corridor = snapshotRef.current?.corridor
     const formatted =
       warning.kind === 'sensor'
@@ -717,6 +813,7 @@ export function SatnavProvider({ children }: { children: ReactNode }) {
             style,
             stepLen,
             corridor?.corridorState === 'narrow' ? corridor.recommendedHeadingOffsetDeg : undefined,
+            unit,
           )
 
     if (warning.kind === 'fast-mover') {
@@ -760,6 +857,10 @@ export function SatnavProvider({ children }: { children: ReactNode }) {
       busy: ambientBusyRef.current || thinkingRef.current,
       listening: listeningRef.current,
       standby: false,
+      lightingState: snapshotRef.current?.lightingState,
+      proactiveVlmAllowed: snapshotRef.current?.proactiveVlmAllowed,
+      mobilityProfile: settingsRef.current.mobilityProfile,
+      corridorState: corridor?.corridorState,
       now: Date.now(),
     })
     if (hazardTask) {
@@ -830,6 +931,9 @@ export function SatnavProvider({ children }: { children: ReactNode }) {
         headingDeg: headingRef.current,
         stepLengthMeters: settingsRef.current.stepLengthMeters,
         directionStyle: settingsRef.current.directionStyle,
+        lightingState: captured.lightingState,
+        proactiveVlmAllowed: captured.proactiveVlmAllowed,
+        mobilityProfile: settingsRef.current.mobilityProfile,
         history: historyRef.current,
       }
 
@@ -940,22 +1044,33 @@ export function SatnavProvider({ children }: { children: ReactNode }) {
         warningDistanceMeters: settingsRef.current.warningDistanceMeters,
         criticalDistanceMeters: 0.85,
         proximityIntervalMs: 120,
+        mountMode: settingsRef.current.mountMode,
       })
       if (epoch !== epochRef.current) {
         await Perception.stopSession().catch(() => {})
         return
       }
 
-      // Start native CoreLocation + true heading tracking (non-fatal if location denied)
+      // Start native CoreLocation + true heading tracking & pocket background support (non-fatal if denied)
       await Nav.startTracking().catch(() => {})
+      await Nav.setBackgroundEnabled(settingsRef.current.backgroundSatnav).catch(() => {})
+      await Voice.setRemoteControlsEnabled(true).catch(() => {})
+      await Voice.updateNowPlaying(
+        'NearDar Walking Satnav',
+        routeProgressRef.current?.active
+          ? `Guiding to ${routeProgressRef.current.route.destinationName}`
+          : 'LiDAR, compass & haptics active',
+      ).catch(() => {})
       await activateKeepAwakeAsync('neardar-satnav').catch(() => {})
+      pocketBgRef.current = false
+      setPocketBackgroundActive(false)
 
       const startedCaps = await Perception.getCapabilities().catch(() => caps)
       if (epoch !== epochRef.current) return
       setCameraPreviewAvailable(startedCaps.cameraPreview === true)
       const nextState: SessionState = startedCaps.depth ? 'active' : 'degraded'
       setState(nextState)
-      setStatusMessage(startedCaps.depth ? 'Satnav live — LiDAR and compass active.' : 'Camera live — depth unavailable on this device.')
+      setStatusMessage(startedCaps.depth ? 'Satnav live — LiDAR and compass active.' : 'Camera live — using camera depth fallback.')
 
       // Warm TensorFold Mobile (or fallback vision model) in background if already downloaded
       if (activeEngineStatusRef.current.state === 'installed') {
@@ -1040,17 +1155,254 @@ export function SatnavProvider({ children }: { children: ReactNode }) {
     await speak(recoveryOffer, { tier: 'interactive' })
   }, [askVisualCompanion, cancelSpeech, speak])
 
+  const toggleTorch = useCallback(async (enabled?: boolean) => {
+    const next = enabled ?? !torchEnabledRef.current
+    const result = await Perception.setTorch(next, 0.45).catch(() => ({ active: false }))
+    torchEnabledRef.current = result.active
+    setTorchEnabled(result.active)
+    const msg = result.active ? 'Torch on.' : next ? 'Torch is unavailable on this device.' : 'Torch off.'
+    await speak(msg, { tier: 'interactive', interrupt: true, record: true })
+  }, [speak])
+
+  const toggleScreenCurtain = useCallback(async (enabled?: boolean) => {
+    const next = enabled ?? !settingsRef.current.screenCurtain
+    await update({ screenCurtain: next })
+    const msg = next
+      ? 'Screen curtain on. Screen is blacked out while all touch gestures stay active. Say turn screen back on anytime.'
+      : 'Screen curtain off.'
+    await speak(msg, { tier: 'interactive', interrupt: true, record: true })
+  }, [speak, update])
+
+  const applyMobilityProfile = useCallback(async (profile: MobilityProfile) => {
+    const patch = applyProfilePatch(profile)
+    await update(patch)
+    const meta = MOBILITY_PROFILES[profile]
+    const msg = `${meta.label} profile active. ${meta.shortDescription}`
+    await speak(msg, { tier: 'interactive', interrupt: true, record: true })
+  }, [speak, update])
+
+  const shareLocationWithContact = useCallback(async () => {
+    await cancelSpeech()
+    const controller = new AbortController()
+    const street = await describeCurrentLocation(controller.signal, () => {}).catch(() => undefined)
+    const message = buildLocationShareMessage({
+      location: locationRef.current,
+      streetAddress: street,
+      headingDegrees: headingRef.current,
+      destinationName: routeProgressRef.current?.active ? routeProgressRef.current.route.destinationName : undefined,
+      senderName: settingsRef.current.companionName || undefined,
+    })
+    const phone = settingsRef.current.emergencyContactPhone
+    const name = settingsRef.current.emergencyContactName || 'your emergency contact'
+    const smsPlatform = Platform.OS === 'ios' ? 'ios' : Platform.OS === 'android' ? 'android' : 'web'
+    const smsUrl = phone ? buildEmergencySmsUrl(phone, message, smsPlatform) : undefined
+    if (smsUrl) {
+      await speak(`Opening message with your location for ${name}.`, { tier: 'interactive', interrupt: true, record: true })
+      await Linking.openURL(smsUrl).catch(async () => {
+        await Share.share({ message }).catch(() => {})
+      })
+      return
+    }
+    await speak('Opening share sheet with your location and map link.', { tier: 'interactive', interrupt: true, record: true })
+    await Share.share({ message }).catch(() => {})
+  }, [cancelSpeech, speak])
+
+  const callEmergencyContact = useCallback(async () => {
+    await cancelSpeech()
+    const phone = settingsRef.current.emergencyContactPhone
+    const name = settingsRef.current.emergencyContactName || 'your emergency contact'
+    const url = buildEmergencyCallUrl(phone)
+    if (!url) {
+      await speak('No emergency contact phone number is saved yet. Add one in Settings under Trusted Contact.', {
+        tier: 'interactive',
+        interrupt: true,
+        record: true,
+      })
+      return
+    }
+    await speak(`Calling ${name}.`, { tier: 'interactive', interrupt: true, record: true })
+    await Linking.openURL(url).catch(async () => {
+      await speak(`Could not place a call to ${name} on this device.`, { tier: 'interactive', interrupt: true })
+    })
+  }, [cancelSpeech, speak])
+
+  const clearSkill = useCallback(() => {
+    setActiveSkill('none')
+    setWatchedBus(undefined)
+  }, [])
+
+  const runSkill = useCallback(async (skill: Exclude<ActiveMobilitySkill, 'none'>, target?: string) => {
+    cancelAmbientNarration()
+    setActiveSkill(skill)
+    if (skill === 'transit' && target) {
+      const normalized = normalizeBusNumber(target)
+      if (normalized) setWatchedBus(normalized)
+    } else if (skill !== 'transit') {
+      setWatchedBus(undefined)
+    }
+
+    if (stateRef.current !== 'active' && stateRef.current !== 'degraded') {
+      await start()
+    }
+
+    const reqId = `satnav-skill-${skill}-${Date.now()}`
+    thinkingRef.current = true
+    setThinking(true)
+    startThinkingTicks()
+    const labelMap: Record<Exclude<ActiveMobilitySkill, 'none'>, string> = {
+      'door-finder': 'Looking for the entrance…',
+      crossing: 'Checking the crossing layout…',
+      transit: target ? `Watching for bus ${normalizeBusNumber(target) || target}…` : 'Checking transit and bus signs…',
+      vivid: 'Taking in the view…',
+      'find-object': `Looking for ${target || 'that item'}…`,
+    }
+    setLastReply({ question: labelMap[skill], text: labelMap[skill], streaming: true, at: Date.now() })
+
+    try {
+      const useTensorFold = usingTensorFoldRef.current
+      if (activeEngineStatusRef.current.state === 'installed' || activeEngineStatusRef.current.state === 'loading') {
+        await (useTensorFold ? tensorfold.prepare(false) : fallbackVision.prepare(false))
+      }
+      const useVlm = activeEngineStatusRef.current.state === 'ready'
+      const captured = await Perception.captureScene({
+        includeImage: useVlm,
+        maxImageLongEdge: skill === 'vivid' || skill === 'find-object' ? 640 : 512,
+        recognizeText: true,
+        detectPeople: true,
+      })
+
+      // Instant zero-VLM bus OCR hit if watching for a specific route number!
+      if (skill === 'transit' && target) {
+        const hit = matchWatchedBusNumber(captured.recognizedText, target)
+        if (hit) {
+          const msg = formatBusMatchAnnouncement(target, hit, undefined, settingsRef.current.directionStyle)
+          if (captured.temporaryImagePath) void Perception.releaseCapture(captured.temporaryImagePath).catch(() => {})
+          if (settingsRef.current.urgentHaptics) void Haptics.playCue('arrived').catch(() => {})
+          setLastReply({ question: labelMap[skill], text: msg, at: Date.now() })
+          await speak(msg, { tier: 'navigation', interrupt: true })
+          return
+        }
+      }
+
+      if (!useVlm || (!captured.temporaryImagePath && !captured.imageBase64)) {
+        const fallback =
+          skill === 'door-finder'
+            ? formatDoorTelemetryFallback(
+                target ?? routeProgressRef.current?.route.destinationName,
+                captured,
+                settingsRef.current.directionStyle,
+                settingsRef.current.stepLengthMeters,
+              )
+            : buildFastCorridorReply(
+                captured,
+                routeProgressRef.current,
+                settingsRef.current.stepLengthMeters,
+                settingsRef.current.directionStyle,
+              )
+        const ocrHint = captured.recognizedText.length > 0 ? ` Visible text: ${captured.recognizedText.slice(0, 4).join(', ')}.` : ''
+        const reply = `${fallback}${ocrHint}`
+        if (captured.temporaryImagePath) void Perception.releaseCapture(captured.temporaryImagePath).catch(() => {})
+        setLastReply({ question: labelMap[skill], text: reply, at: Date.now() })
+        await speak(reply, { tier: 'interactive', interrupt: true })
+        return
+      }
+
+      const skillPrompt = buildMobilitySkillPrompt(
+        skill,
+        {
+          snapshot: captured,
+          route: routeProgressRef.current,
+          headingDeg: headingRef.current,
+          stepLengthMeters: settingsRef.current.stepLengthMeters,
+          directionStyle: settingsRef.current.directionStyle,
+          lightingState: captured.lightingState,
+          mobilityProfile: settingsRef.current.mobilityProfile,
+          history: historyRef.current,
+        },
+        target,
+      )
+
+      activeVisionReqRef.current = reqId
+      streamSplitterRef.current = new SentenceStreamSplitter()
+      streamedAnyRef.current = false
+
+      try {
+        const raw = useTensorFold
+          ? await Engine.generate({
+              requestId: reqId,
+              question: skillPrompt.prompt,
+              system: skillPrompt.system,
+              prompt: skillPrompt.prompt,
+              imageBase64: captured.imageBase64,
+              temporaryImagePath: captured.temporaryImagePath,
+              maxImageTokens: skillPrompt.maxImageTokens,
+              maxTokens: skillPrompt.maxTokens,
+              temperature: skillPrompt.temperature,
+            })
+          : await Vision.describeScene({
+              requestId: reqId,
+              prompt: skillPrompt.combined,
+              imageBase64: captured.imageBase64,
+              temporaryImagePath: captured.temporaryImagePath,
+              maxTokens: skillPrompt.maxTokens,
+            })
+
+        if (activeVisionReqRef.current !== reqId) return
+        const finalClean = formatMobilitySkillOutput(skill, raw) || buildFastCorridorReply(
+          captured,
+          routeProgressRef.current,
+          settingsRef.current.stepLengthMeters,
+          settingsRef.current.directionStyle,
+        )
+        const tail = streamSplitterRef.current?.flush(finalClean)
+        setLastReply({ question: labelMap[skill], text: finalClean, streaming: false, at: Date.now() })
+
+        if (tail) {
+          await speak(tail, { tier: 'interactive', interrupt: !streamedAnyRef.current })
+        } else if (!streamedAnyRef.current) {
+          await speak(finalClean, { tier: 'interactive', interrupt: true })
+        }
+      } finally {
+        if (activeVisionReqRef.current === reqId) activeVisionReqRef.current = undefined
+        streamSplitterRef.current = null
+        if (captured.temporaryImagePath) {
+          void Perception.releaseCapture(captured.temporaryImagePath).catch(() => {})
+        }
+      }
+    } catch {
+      const fallback = buildFastCorridorReply(
+        snapshotRef.current,
+        routeProgressRef.current,
+        settingsRef.current.stepLengthMeters,
+        settingsRef.current.directionStyle,
+      )
+      setLastReply({ question: labelMap[skill], text: fallback, at: Date.now() })
+      await speak(fallback, { tier: 'interactive', interrupt: true })
+    } finally {
+      thinkingRef.current = false
+      stopThinkingTicks()
+      if (mountedRef.current) setThinking(false)
+    }
+  }, [cancelAmbientNarration, fallbackVision, speak, start, startThinkingTicks, stopThinkingTicks, tensorfold])
+
   const pause = useCallback(async (silent = false) => {
     epochRef.current += 1
     await cancelSpeech()
     await Promise.allSettled([
+      Perception.setTorch(false, 0),
       Perception.stopSession(),
+      Nav.setBackgroundEnabled(false),
       Nav.stopTracking(),
+      Voice.setRemoteControlsEnabled(false),
       Voice.stopListening(),
       Voice.stopSpatialAudio(),
       Haptics.stop(),
       deactivateKeepAwake('neardar-satnav'),
     ])
+    torchEnabledRef.current = false
+    setTorchEnabled(false)
+    pocketBgRef.current = false
+    setPocketBackgroundActive(false)
     listeningRef.current = false
     arbitratorRef.current.setListening(false)
     setListening(false)
@@ -1132,10 +1484,77 @@ export function SatnavProvider({ children }: { children: ReactNode }) {
           await speak('No route is active. Say take me to a destination, or ask what is ahead.', { interrupt: true, record: true })
           return
         }
-        const rem = formatWalkingDistance(prog.remainingDistanceMeters, settingsRef.current.stepLengthMeters)
-        const turnDist = formatWalkingDistance(prog.distanceToNextTurnMeters, settingsRef.current.stepLengthMeters)
+        const unit = settingsRef.current.distanceUnit
+        const rem = formatWalkingDistance(prog.remainingDistanceMeters, settingsRef.current.stepLengthMeters, unit)
+        const turnDist = formatWalkingDistance(prog.distanceToNextTurnMeters, settingsRef.current.stepLengthMeters, unit)
         const nextLine = prog.nextStep ? ` Next: ${prog.nextStep.instruction} in ${turnDist}.` : ''
         await speak(`${rem} left to ${prog.route.destinationName}. ${prog.currentStep.instruction}.${nextLine}`, { interrupt: true, record: true })
+        return
+      }
+      case 'find-door':
+        await runSkill('door-finder', routeProgressRef.current?.route.destinationName)
+        return
+      case 'crossing-assist':
+        await runSkill('crossing')
+        return
+      case 'watch-bus':
+        await runSkill('transit', intent.busNumber)
+        return
+      case 'vivid-scene':
+        await runSkill('vivid')
+        return
+      case 'find-object':
+        await runSkill('find-object', intent.target)
+        return
+      case 'emergency-share':
+        await shareLocationWithContact()
+        return
+      case 'emergency-call':
+        await callEmergencyContact()
+        return
+      case 'toggle-torch':
+        await toggleTorch(intent.enabled)
+        return
+      case 'toggle-curtain':
+        await toggleScreenCurtain(intent.enabled)
+        return
+      case 'set-profile':
+        await applyMobilityProfile(intent.profile)
+        return
+      case 'indoor-save': {
+        const heading = headingRef.current ?? 0
+        const next = await saveIndoorAnchor({
+          spaceName: 'Indoor Space',
+          label: intent.name,
+          x: 0,
+          y: snapshotRef.current?.corridor?.floorHeightMeters ?? 0,
+          z: 0,
+          headingDeg: heading,
+        })
+        setIndoorAnchors(next)
+        await speak(`Saved indoor waypoint ${intent.name} facing ${cardinalDirection(heading)}.`, {
+          tier: 'interactive',
+          interrupt: true,
+          record: true,
+        })
+        return
+      }
+      case 'indoor-guide': {
+        const target = findIndoorAnchorByLabel(indoorAnchorsRef.current, intent.name)
+        if (!target) {
+          await speak(`I don’t have a saved indoor spot called ${intent.name}. Say remember this room as ${intent.name} when you are there.`, {
+            tier: 'interactive',
+            interrupt: true,
+            record: true,
+          })
+          return
+        }
+        const guidance = computeIndoorGuidance(
+          { x: 0, y: snapshotRef.current?.corridor?.floorHeightMeters ?? 0, z: 0, headingDeg: headingRef.current ?? 0 },
+          target,
+          settingsRef.current.stepLengthMeters,
+        )
+        await speak(guidance.spokenGuidance, { tier: 'interactive', interrupt: true, record: true })
         return
       }
       case 'location': {
@@ -1173,7 +1592,9 @@ export function SatnavProvider({ children }: { children: ReactNode }) {
         return
     }
   }, [
+    applyMobilityProfile,
     askVisualCompanion,
+    callEmergencyContact,
     cancelRoute,
     cancelSpeech,
     lastReply?.text,
@@ -1181,13 +1602,19 @@ export function SatnavProvider({ children }: { children: ReactNode }) {
     navigateToDestination,
     orientMe,
     pause,
+    runSkill,
     saveCurrentPlace,
     setMode,
+    shareLocationWithContact,
     speak,
     start,
+    toggleScreenCurtain,
+    toggleTorch,
   ])
 
   handleTranscriptRef.current = submitCommand
+  quickScanRef.current = quickScanAhead
+  orientMeRef.current = orientMe
 
   const beginTalk = useCallback(async () => {
     if (listeningRef.current) {
@@ -1227,6 +1654,8 @@ export function SatnavProvider({ children }: { children: ReactNode }) {
       if (Platform.OS === 'ios') announce(notice)
     }
   }, [cancelSpeech, submitCommand])
+
+  beginTalkRef.current = beginTalk
 
   const endTalk = useCallback(async () => {
     if (!listeningRef.current) return
@@ -1296,11 +1725,12 @@ export function SatnavProvider({ children }: { children: ReactNode }) {
     }
   }, [speak])
 
-  // Initial load of persisted places, cached routes, and voice capabilities
+  // Initial load of persisted places, cached routes, indoor anchors, and voice capabilities
   useEffect(() => {
     mountedRef.current = true
     void loadSavedPlaces().then((places) => { if (mountedRef.current) setSavedPlaces(places) })
     void loadCachedRoutes().then((routes) => { if (mountedRef.current) setCachedRoutes(routes) })
+    void loadIndoorAnchors().then((anchors) => { if (mountedRef.current) setIndoorAnchors(anchors) })
     void Voice.getCapabilities().then((caps) => {
       if (!mountedRef.current) return
       setVoice(caps)
@@ -1314,6 +1744,10 @@ export function SatnavProvider({ children }: { children: ReactNode }) {
     const perceptionSub = Perception.addPerceptionListener((event) => {
       if (event.snapshot && (stateRef.current === 'starting' || stateRef.current === 'active' || stateRef.current === 'degraded')) {
         setSnapshot(event.snapshot)
+        if (event.snapshot.thermalState) setThermalState(event.snapshot.thermalState)
+        if (event.snapshot.lightingState) setLightingState(event.snapshot.lightingState)
+        if (event.snapshot.depthSource) setDepthSource(event.snapshot.depthSource)
+
         if (event.snapshot.headingDegrees !== undefined && Number.isFinite(event.snapshot.headingDegrees)) {
           // ARKit gravityAndHeading gives ultra-smooth drift-free true north heading!
           setHeadingDegrees(event.snapshot.headingDegrees)
@@ -1322,25 +1756,63 @@ export function SatnavProvider({ children }: { children: ReactNode }) {
             applyRouteUpdate(locationRef.current, event.snapshot.headingDegrees)
           }
         }
-        const healthy = event.snapshot.trackingReady && event.snapshot.depthState === 'ready'
+        const healthy = event.snapshot.trackingReady && (event.snapshot.depthState === 'ready' || event.snapshot.depthSource === 'feature-points')
         if (!healthy && stateRef.current === 'active') {
           setState('degraded')
           setStatusMessage(cameraRecoveryHint(event.snapshot))
         } else if (healthy && stateRef.current === 'degraded') {
           setState('active')
-          setStatusMessage('Satnav live — LiDAR and compass active.')
+          setStatusMessage(
+            event.snapshot.depthSource === 'feature-points'
+              ? 'Satnav live — camera depth fallback and compass active.'
+              : 'Satnav live — LiDAR and compass active.',
+          )
+        }
+
+        const now = Date.now()
+        const inStandby = event.snapshot.aimState === 'lowered' || event.snapshot.aimState === 'covered'
+
+        // Low-light awareness & optional adaptive torch assist
+        if (!inStandby && event.snapshot.lightingState === 'dark' && now - lastDarkNoticeAtRef.current >= 60_000) {
+          lastDarkNoticeAtRef.current = now
+          if (settingsRef.current.autoTorch && !torchEnabledRef.current) {
+            void Perception.setTorch(true, 0.35).then((res) => {
+              if (mountedRef.current) {
+                torchEnabledRef.current = res.active
+                setTorchEnabled(res.active)
+              }
+            }).catch(() => {})
+          } else if (settingsRef.current.guidanceMode !== 'quiet') {
+            void speak(
+              event.snapshot.depthSource === 'lidar'
+                ? 'It is dark ahead. LiDAR obstacle protection stays active, though visual reading is limited.'
+                : 'It is very dark ahead. Say turn on the torch if you need light for signs.',
+              { tier: 'ambient', category: 'low-light', cooldownMs: 60_000 },
+            )
+          }
+        }
+
+        // Instant zero-VLM OCR bus watcher when actively watching for a bus number
+        if (!inStandby && watchedBusRef.current && event.snapshot.recognizedText.length > 0 && now - lastBusSpotAtRef.current >= 8_000) {
+          const hit = matchWatchedBusNumber(event.snapshot.recognizedText, watchedBusRef.current)
+          if (hit) {
+            lastBusSpotAtRef.current = now
+            const msg = formatBusMatchAnnouncement(watchedBusRef.current, hit, undefined, settingsRef.current.directionStyle)
+            if (settingsRef.current.urgentHaptics) void Haptics.playCue('arrived').catch(() => {})
+            void Voice.playSpatialCue({ kind: 'arrived' }).catch(() => {})
+            void speak(msg, { tier: 'navigation', interrupt: true, record: true })
+          }
         }
 
         // Real-time Apple Vision presence (dogs, cats, people, crowds) & doorway openings
-        const now = Date.now()
-        const inStandby = event.snapshot.aimState === 'lowered' || event.snapshot.aimState === 'covered'
         if (!inStandby && !listeningRef.current && !thinkingRef.current) {
           const presence = detectLivePresence(
             event.snapshot,
             settingsRef.current.directionStyle,
             settingsRef.current.stepLengthMeters,
+            settingsRef.current.distanceUnit,
           )
-          if (presence) {
+          if (presence && shouldAnnouncePresenceForProfile(presence.kind, settingsRef.current.mobilityProfile)) {
             const cooldownMs =
               presence.kind === 'animal' ? 9_000 : presence.kind === 'opening' ? 14_000 : 12_000
             if (now - lastPresenceCueAtRef.current >= 4_000) {
@@ -1398,6 +1870,9 @@ export function SatnavProvider({ children }: { children: ReactNode }) {
             headingDeg: headingRef.current,
             directionStyle: settingsRef.current.directionStyle,
             stepLengthMeters: settingsRef.current.stepLengthMeters,
+            lightingState: event.snapshot.lightingState,
+            proactiveVlmAllowed: event.snapshot.proactiveVlmAllowed,
+            mobilityProfile: settingsRef.current.mobilityProfile,
             lastCriticalAt: lastCriticalAtRef.current,
             now,
           })
@@ -1409,8 +1884,30 @@ export function SatnavProvider({ children }: { children: ReactNode }) {
       if (event.warning) {
         void handleWarning(event.warning)
       }
-      if (event.type === 'lifecycle' && event.foreground === false && (stateRef.current === 'active' || stateRef.current === 'degraded')) {
-        void pause(true)
+      if (event.type === 'lifecycle') {
+        if (event.foreground === false && (stateRef.current === 'active' || stateRef.current === 'degraded')) {
+          if (settingsRef.current.backgroundSatnav && routeProgressRef.current?.active) {
+            // Keep GPS walking satnav, 3D spatial audio beacon, and Lock Screen earbud triggers alive in pocket!
+            pocketBgRef.current = true
+            setPocketBackgroundActive(true)
+            setStatusMessage('Pocket mode — GPS turns & 3D audio beacon active.')
+            void Perception.setTorch(false, 0).catch(() => {})
+            void Perception.stopSession().catch(() => {})
+          } else {
+            void pause(true)
+          }
+        } else if (event.foreground === true && pocketBgRef.current) {
+          pocketBgRef.current = false
+          setPocketBackgroundActive(false)
+          setStatusMessage('Resuming LiDAR and camera sensors…')
+          void Perception.startSession({
+            stepLengthMeters: settingsRef.current.stepLengthMeters,
+            warningDistanceMeters: settingsRef.current.warningDistanceMeters,
+            criticalDistanceMeters: 0.85,
+            proximityIntervalMs: 120,
+            mountMode: settingsRef.current.mountMode,
+          }).catch(() => {})
+        }
       }
     })
 
@@ -1444,6 +1941,12 @@ export function SatnavProvider({ children }: { children: ReactNode }) {
     })
 
     const voiceSub = Voice.addVoiceListener((event) => {
+      if (event.type === 'remoteTrigger') {
+        if (event.action === 'talk') void beginTalkRef.current()
+        else if (event.action === 'scan') void quickScanRef.current()
+        else if (event.action === 'orient') void orientMeRef.current(true)
+        return
+      }
       if (event.type === 'partial' && event.text) {
         partialRef.current = event.text
         setPartialTranscript(event.text)
@@ -1528,8 +2031,11 @@ export function SatnavProvider({ children }: { children: ReactNode }) {
       engineSub.remove()
       visionSub.remove()
       void Promise.allSettled([
+        Perception.setTorch(false, 0),
         Perception.stopSession(),
+        Nav.setBackgroundEnabled(false),
         Nav.stopTracking(),
+        Voice.setRemoteControlsEnabled(false),
         Voice.stopListening(),
         Voice.stopSpeaking(),
         Voice.stopSpatialAudio(),
@@ -1571,6 +2077,14 @@ export function SatnavProvider({ children }: { children: ReactNode }) {
         usingTensorFoldEngine,
         voice,
         mode: settings.guidanceMode,
+        activeSkill,
+        watchedBus,
+        torchEnabled,
+        thermalState,
+        lightingState,
+        depthSource,
+        pocketBackgroundActive,
+        indoorAnchors,
         start,
         pause,
         togglePause,
@@ -1578,6 +2092,13 @@ export function SatnavProvider({ children }: { children: ReactNode }) {
         endTalk,
         quickScanAhead,
         orientMe,
+        runSkill,
+        clearSkill,
+        toggleTorch,
+        toggleScreenCurtain,
+        applyMobilityProfile,
+        shareLocationWithContact,
+        callEmergencyContact,
         submitCommand,
         cancelSpeech,
         cycleMode,

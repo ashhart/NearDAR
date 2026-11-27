@@ -39,6 +39,7 @@ export interface NavigationCapabilities {
   mapKitDirections: boolean
   compassHeading: boolean
   locationPermission: 'granted' | 'denied' | 'restricted' | 'notDetermined' | 'unknown'
+  backgroundSupported?: boolean
 }
 
 export interface NavigationEvent {
@@ -59,6 +60,7 @@ interface NativeTensorFoldNavigation {
   getCapabilities(): Promise<NavigationCapabilities>
   startTracking(): Promise<{ active: boolean }>
   stopTracking(): Promise<void>
+  setBackgroundEnabled?(enabled: boolean): Promise<void>
   searchPlaces(query: string, nearLat?: number | null, nearLng?: number | null): Promise<PlaceMatch[]>
   calculateWalkingRoute(
     fromLat: number,
@@ -90,6 +92,7 @@ export async function getCapabilities(): Promise<NavigationCapabilities> {
     mapKitDirections: false,
     compassHeading: Platform.OS !== 'web',
     locationPermission: 'unknown',
+    backgroundSupported: false,
   }
 }
 
@@ -135,6 +138,12 @@ export async function stopTracking(): Promise<void> {
   fallbackPositionSub = null
   fallbackHeadingSub?.remove()
   fallbackHeadingSub = null
+}
+
+export async function setBackgroundEnabled(enabled: boolean): Promise<void> {
+  if (native?.setBackgroundEnabled) {
+    await native.setBackgroundEnabled(enabled)
+  }
 }
 
 export async function searchPlaces(query: string, near?: GeoPoint): Promise<PlaceMatch[]> {

@@ -13,6 +13,7 @@ struct PerceptionSettings {
   var detectPeople = true
   var recognizeText = true
   var ocrLanguages: [String] = []
+  var mountMode = "handheld"
 
   init(_ values: [String: Any]?) throws {
     if let value = values?["stepLengthMeters"] as? Double {
@@ -24,6 +25,12 @@ struct PerceptionSettings {
     if let value = values?["maximumFrameAgeMs"] as? Double { maximumFrameAgeMs = value }
     if let value = values?["maximumAlignmentAgeMs"] as? Double { maximumAlignmentAgeMs = value }
     if let value = values?["proximityIntervalMs"] as? Double { proximityIntervalMs = value }
+    if let value = values?["mountMode"] as? String {
+      guard value == "handheld" || value == "lanyard" else {
+        throw PerceptionError("E_OPTIONS", "mountMode must be 'handheld' or 'lanyard'.")
+      }
+      mountMode = value
+    }
     guard warningDistance > criticalDistance, criticalDistance > 0, maximumFrameAgeMs >= 100,
       maximumAlignmentAgeMs >= 0, proximityIntervalMs >= 100 else {
       throw PerceptionError("E_OPTIONS", "Invalid distance, freshness, or proximity interval settings.")

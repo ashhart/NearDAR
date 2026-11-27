@@ -1,6 +1,26 @@
 import type { CorridorOpening, SpatialHazard } from '../../../modules/tensorfold-perception/src'
-import type { Direction, DirectionStyle, SceneObject, SceneSnapshot } from '../guidance/types'
+import type { Direction, DirectionStyle, DistanceUnit, SceneObject, SceneSnapshot } from '../guidance/types'
 import { formatWalkingDistance } from '../navigation/geo'
+
+const METERS_TO_FEET = 3.28084
+const METERS_PER_MILE = 1609.344
+
+/** Compact distance label for HUD chips and short status badges (e.g. "2.4m", "8ft", "0.3mi"). */
+export function formatShortDistance(meters: number, unit: DistanceUnit = 'metric'): string {
+  if (!Number.isFinite(meters) || meters < 0) return '--'
+  if (unit === 'imperial') {
+    if (meters < 0.9) return '<3ft'
+    if (meters < 400) {
+      const feet = meters * METERS_TO_FEET
+      const rounded = feet < 100 ? Math.round(feet) : Math.round(feet / 10) * 10
+      return `${rounded}ft`
+    }
+    return `${(meters / METERS_PER_MILE).toFixed(1)}mi`
+  }
+  if (meters < 10) return `${meters.toFixed(1)}m`
+  if (meters < 1000) return `${Math.round(meters)}m`
+  return `${(meters / 1000).toFixed(1)}km`
+}
 
 /**
  * 4-tier speech priority model designed for Orientation & Mobility (O&M) safety:
@@ -214,9 +234,10 @@ export function formatHazardCallout(
   style: DirectionStyle,
   stepLengthMeters?: number,
   recommendedHeadingOffsetDeg?: number,
+  unit: DistanceUnit = 'metric',
 ): string {
   const dir = formatDirectionLabel(hazard.direction, style, hazard.bearingDegrees)
-  const dist = formatWalkingDistance(hazard.distanceMeters, stepLengthMeters)
+  const dist = formatWalkingDistance(hazard.distanceMeters, stepLengthMeters, unit)
   switch (hazard.kind) {
     case 'fast-mover':
       return `Fast movement, ${dir}, ${dist} — hold still.`
@@ -255,6 +276,7 @@ export function detectLivePresence(
   snapshot: SceneSnapshot | undefined,
   style: DirectionStyle,
   stepLengthMeters?: number,
+  unit: DistanceUnit = 'metric',
 ): LivePresenceEvent | undefined {
   if (!snapshot?.trackingReady) return undefined
   if (snapshot.aimState === 'lowered' || snapshot.aimState === 'covered') return undefined
@@ -278,7 +300,7 @@ export function detectLivePresence(
       direction: pet.direction,
       bearingDegrees: bearing,
       distanceMeters: dist,
-      message: `${name}, ${dir}, ${formatWalkingDistance(dist, stepLengthMeters)}.`,
+      message: `${name}, ${dir}, ${formatWalkingDistance(dist, stepLengthMeters, unit)}.`,
       category: `animal:${pet.label}:${pet.direction}`,
     }
   }
@@ -297,7 +319,7 @@ export function detectLivePresence(
       direction: nearest.direction,
       bearingDegrees: directionToBearing(nearest.direction, nearest.clockSector),
       distanceMeters: dist,
-      message: `Busy ahead — ${nearbyPeople.length} people, nearest ${formatWalkingDistance(dist, stepLengthMeters)}.`,
+      message: `Busy ahead — ${nearbyPeople.length} people, nearest ${formatWalkingDistance(dist, stepLengthMeters, unit)}.`,
       category: 'presence:crowd',
     }
   }
@@ -313,7 +335,7 @@ export function detectLivePresence(
       direction: person.direction,
       bearingDegrees: bearing,
       distanceMeters: dist,
-      message: `Person, ${dir}, ${formatWalkingDistance(dist, stepLengthMeters)}.`,
+      message: `Person, ${dir}, ${formatWalkingDistance(dist, stepLengthMeters, unit)}.`,
       category: `presence:person:${person.direction}`,
     }
   }
@@ -332,7 +354,7 @@ export function detectLivePresence(
       direction: bestOpening.direction,
       bearingDegrees: bestOpening.bearingDegrees,
       distanceMeters: bestOpening.distanceMeters,
-      message: `Opening, ${dir}, ${formatWalkingDistance(bestOpening.distanceMeters, stepLengthMeters)}.`,
+      message: `Opening, ${dir}, ${formatWalkingDistance(bestOpening.distanceMeters, stepLengthMeters, unit)}.`,
       category: `presence:opening:${bestOpening.direction}`,
     }
   }
@@ -347,7 +369,10 @@ export interface LiveEntityChip {
 }
 
 /** Builds high-contrast HUD chips for low-vision users from the live snapshot. */
-export function extractLiveEntityChips(snapshot: SceneSnapshot | undefined): LiveEntityChip[] {
+export function extractLiveEntityChips(
+  snapshot: SceneSnapshot | undefined,
+  unit: DistanceUnit = 'metric',
+): LiveEntityChip[] {
   if (!snapshot) return []
   const chips: LiveEntityChip[] = []
 
@@ -359,12 +384,12 @@ export function extractLiveEntityChips(snapshot: SceneSnapshot | undefined): Liv
   const hazards = snapshot.hazards ?? []
   const fast = hazards.find((h) => h.kind === 'fast-mover')
   if (fast) {
-    chips.push({ id: 'fast-mover', label: `Fast mover ${fast.distanceMeters.toFixed(1)}m`, tone: 'danger' })
+    chips.push({ id: 'fast-mover', label: `Fast mover ${formatShortDistance(fast.distanceMeters, unit)}`, tone: 'danger' })
   }
   const vertical = hazards.find((h) => h.kind === 'drop-off' || h.kind === 'step-down' || h.kind === 'head-height')
   if (vertical) {
     const title = vertical.kind === 'head-height' ? 'Head hazard' : vertical.kind === 'drop-off' ? 'Drop-off' : 'Step down'
-    chips.push({ id: vertical.id, label: `${title} ${vertical.distanceMeters.toFixed(1)}m`, tone: 'danger' })
+    chips.push({ id: vertical.id, label: `${title} ${formatShortDistance(vertical.distanceMeters, unit)}`, tone: 'danger' })
   }
 
   const objects: SceneObject[] = snapshot.objects ?? []
@@ -374,7 +399,7 @@ export function extractLiveEntityChips(snapshot: SceneSnapshot | undefined): Liv
   if (animal) {
     chips.push({
       id: animal.id,
-      label: `${animal.label[0]!.toUpperCase() + animal.label.slice(1)} ${animal.distanceMeters!.toFixed(1)}m`,
+      label: `${animal.label[0]!.toUpperCase() + animal.label.slice(1)} ${formatShortDistance(animal.distanceMeters!, unit)}`,
       tone: 'accent',
     })
   }
@@ -383,7 +408,7 @@ export function extractLiveEntityChips(snapshot: SceneSnapshot | undefined): Liv
   if (people.length >= 2) {
     chips.push({ id: 'people-count', label: `${people.length} people`, tone: 'warn' })
   } else if (people[0]) {
-    chips.push({ id: people[0].id, label: `Person ${people[0].distanceMeters!.toFixed(1)}m`, tone: 'warn' })
+    chips.push({ id: people[0].id, label: `Person ${formatShortDistance(people[0].distanceMeters!, unit)}`, tone: 'warn' })
   }
 
   const opening = snapshot.corridor?.openings?.[0]
